@@ -1,0 +1,70 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --color-ink-950: #07111f;
+  --color-ink-900: #0b1728;
+  --color-ink-800: #14233a;
+  --color-mint-50: #ecfdf8;
+  --color-mint-100: #d2f8ed;
+  --color-mint-400: #31d5ae;
+  --color-mint-500: #16b991;
+  --color-mint-600: #0d9675;
+  --shadow-card: 0 1px 2px rgba(7, 17, 31, 0.04), 0 10px 30px rgba(7, 17, 31, 0.06);
+  --shadow-float: 0 24px 64px rgba(7, 17, 31, 0.18);
+}
+
+@layer base {
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    min-width: 320px;
+    min-height: 100vh;
+    margin: 0;
+    background: #f7f9fc;
+    color: #142033;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, textarea, select { font: inherit; }
+  button, a { -webkit-tap-highlight-color: transparent; }
+  :focus-visible {
+    outline: 3px solid rgba(22, 185, 145, 0.3);
+    outline-offset: 2px;
+  }
+  label:has(input[type="radio"]:focus-visible) {
+    outline: 3px solid rgba(22, 185, 145, 0.3);
+    outline-offset: 2px;
+  }
+  ::selection { background: #d2f8ed; color: #07111f; }
+}
+
+@layer components {
+  .container-shell { @apply mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8; }
+  .card { @apply rounded-2xl border border-slate-200/80 bg-white shadow-card; }
+  .btn-primary { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-mint-500 px-5 py-2.5 text-sm font-bold text-ink-950 shadow-sm transition duration-200 hover:bg-mint-400 disabled:cursor-not-allowed disabled:opacity-55; }
+  .btn-secondary { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-bold text-slate-800 transition duration-200 hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-55; }
+  .btn-dark { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-ink-950 px-5 py-2.5 text-sm font-bold text-white transition duration-200 hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-55; }
+  .field-input { @apply min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 hover:border-slate-400 focus:border-mint-500 focus:ring-4 focus:ring-mint-500/10 focus:outline-none; }
+  .field-input-error { @apply border-rose-400 focus:border-rose-500 focus:ring-rose-500/10; }
+  .eyebrow { @apply text-xs font-bold tracking-[0.14em] text-mint-600 uppercase; }
+  .section-heading { @apply font-display text-3xl font-bold tracking-tight text-ink-950 sm:text-4xl; }
+}
+
+@keyframes enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.page-enter { animation: enter 320ms ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
