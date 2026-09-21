@@ -56,27 +56,30 @@ type LinkBlockchainJobParams struct {
 }
 
 const jobColumns = `
-	id,
-	creator_user_id,
-	hiring_method,
-	title,
-	description,
-	required_skills,
-	budget,
-	application_deadline,
-	delivery_deadline,
-	reference_url,
-	marketplace_status,
-	selected_freelancer_user_id,
-	selected_freelancer_wallet,
-	blockchain_job_id,
-	contract_address,
-	funding_transaction_hash,
-	metadata_hash,
-	escrow_status,
-	chain_id,
-	created_at,
-	updated_at`
+	j.id,
+	j.creator_user_id,
+	u.wallet_address AS creator_wallet,
+	j.hiring_method,
+	j.title,
+	j.description,
+	j.required_skills,
+	j.budget,
+	j.application_deadline,
+	j.delivery_deadline,
+	j.reference_url,
+	j.marketplace_status,
+	j.selected_freelancer_user_id,
+	j.selected_freelancer_wallet,
+	j.blockchain_job_id,
+	j.contract_address,
+	j.funding_transaction_hash,
+	j.metadata_hash,
+	j.escrow_status,
+	j.chain_id,
+	j.created_at,
+	j.updated_at`
+
+const jobFrom = ` FROM jobs j JOIN users u ON u.id = j.creator_user_id `
 
 // NewJobRepository constructs a repository using an existing connection pool.
 func NewJobRepository(db *sql.DB) *JobRepository {
@@ -128,7 +131,7 @@ func (r *JobRepository) Create(ctx context.Context, params CreateJobParams) (uin
 // returned as a wrapped sql.ErrNoRows.
 func (r *JobRepository) FindByID(ctx context.Context, id uint64) (*models.Job, error) {
 	job, err := scanJob(r.db.QueryRowContext(ctx,
-		"SELECT "+jobColumns+" FROM jobs WHERE id = ?",
+		"SELECT "+jobColumns+jobFrom+"WHERE j.id = ?",
 		id,
 	))
 	if err != nil {
@@ -143,10 +146,9 @@ func (r *JobRepository) FindByID(ctx context.Context, id uint64) (*models.Job, e
 // the returned slice for display or pagination at a higher layer.
 func (r *JobRepository) ListOpen(ctx context.Context) ([]*models.Job, error) {
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT "+jobColumns+`
-		FROM jobs
-		WHERE marketplace_status = 'open'
-		ORDER BY created_at DESC, id DESC`,
+		"SELECT "+jobColumns+jobFrom+`
+		WHERE j.marketplace_status = 'open'
+		ORDER BY j.created_at DESC, j.id DESC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list open jobs: %w", err)
@@ -159,10 +161,9 @@ func (r *JobRepository) ListOpen(ctx context.Context) ([]*models.Job, error) {
 // ListByCreator returns all jobs created by a given user, newest first.
 func (r *JobRepository) ListByCreator(ctx context.Context, creatorUserID uint64) ([]*models.Job, error) {
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT "+jobColumns+`
-		FROM jobs
-		WHERE creator_user_id = ?
-		ORDER BY created_at DESC, id DESC`,
+		"SELECT "+jobColumns+jobFrom+`
+		WHERE j.creator_user_id = ?
+		ORDER BY j.created_at DESC, j.id DESC`,
 		creatorUserID,
 	)
 	if err != nil {
@@ -177,10 +178,9 @@ func (r *JobRepository) ListByCreator(ctx context.Context, creatorUserID uint64)
 // newest first.
 func (r *JobRepository) ListBySelectedFreelancer(ctx context.Context, freelancerUserID uint64) ([]*models.Job, error) {
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT "+jobColumns+`
-		FROM jobs
-		WHERE selected_freelancer_user_id = ?
-		ORDER BY created_at DESC, id DESC`,
+		"SELECT "+jobColumns+jobFrom+`
+		WHERE j.selected_freelancer_user_id = ?
+		ORDER BY j.created_at DESC, j.id DESC`,
 		freelancerUserID,
 	)
 	if err != nil {
@@ -323,6 +323,7 @@ func scanJob(row rowScanner) (*models.Job, error) {
 	if err := row.Scan(
 		&j.ID,
 		&j.CreatorUserID,
+		&j.CreatorWallet,
 		&j.HiringMethod,
 		&j.Title,
 		&j.Description,

@@ -1,9 +1,11 @@
 import { LoaderCircle, PlugZap, WalletCards } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import useApp from '../hooks/useApp'
 import { shortenAddress } from '../utils/format'
 
-export default function ConnectWalletButton({ dark = false, className = '' }) {
+export default function ConnectWalletButton({ dark = false, className = '', redirectOnConnect = false }) {
   const { wallet, isWalletConnected, isWalletBusy, connectWallet, authError } = useApp()
+  const navigate = useNavigate()
 
   if (isWalletConnected) {
     return (
@@ -15,11 +17,16 @@ export default function ConnectWalletButton({ dark = false, className = '' }) {
     )
   }
 
+  const handleConnect = () => {
+    const onSuccess = redirectOnConnect ? () => navigate('/dashboard') : undefined
+    connectWallet(onSuccess)
+  }
+
   return (
     <div className="flex flex-col">
       <button
         type="button"
-        onClick={connectWallet}
+        onClick={handleConnect}
         disabled={isWalletBusy}
         className={`${dark ? 'btn-primary' : 'btn-dark'} ${className}`}
       >

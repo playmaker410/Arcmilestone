@@ -68,7 +68,7 @@ func (r *AuthNonceRepository) FindValidByNonceHash(ctx context.Context, nonceHas
 		FROM auth_nonces
 		WHERE nonce_hash = ?
 		  AND used_at IS NULL
-		  AND expires_at > NOW(6)`,
+		  AND expires_at > UTC_TIMESTAMP(6)`,
 		nonceHash,
 	))
 	if err != nil {
@@ -122,7 +122,7 @@ func (r *AuthNonceRepository) MarkUsed(ctx context.Context, id uint64, usedAt ti
 func (r *AuthNonceRepository) DeleteExpired(ctx context.Context) (int64, error) {
 	result, err := r.db.ExecContext(ctx, `
 		DELETE FROM auth_nonces
-		WHERE expires_at <= NOW(6)
+		WHERE expires_at <= UTC_TIMESTAMP(6)
 		  AND used_at IS NOT NULL`)
 	if err != nil {
 		return 0, fmt.Errorf("delete expired auth nonces: %w", err)

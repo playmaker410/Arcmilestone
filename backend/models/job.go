@@ -42,6 +42,7 @@ const (
 type Job struct {
 	ID                       uint64            `json:"id"`
 	CreatorUserID            uint64            `json:"creator_user_id"`
+	CreatorWallet            string            `json:"creator_wallet"`
 	HiringMethod             HiringMethod      `json:"hiring_method"`
 	Title                    string            `json:"title"`
 	Description              string            `json:"description"`

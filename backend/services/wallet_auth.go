@@ -121,7 +121,7 @@ func (s *WalletAuthService) VerifySignature(ctx context.Context, walletAddress, 
 	}
 
 	// Locate the valid nonce by hash. FindValidByNonceHash already requires
-	// used_at IS NULL and expires_at > NOW(6), preventing replay and expiry bypass.
+	// used_at IS NULL and expires_at > UTC_TIMESTAMP(6), preventing replay and expiry bypass.
 	hash := sha256.Sum256([]byte(nonce))
 	nonceHash := hex.EncodeToString(hash[:])
 
@@ -221,6 +221,7 @@ func recoverAddress(nonce, hexSig string) (string, error) {
 
 	// Ethereum's v byte is 27 or 28; normalize to 0 or 1 for secp256k1.
 	v := sigBytes[64]
+
 	if v >= 27 {
 		v -= 27
 	}
@@ -228,7 +229,7 @@ func recoverAddress(nonce, hexSig string) (string, error) {
 		return "", fmt.Errorf("invalid signature v value")
 	}
 
-	// Reconstruct the compact signature [R || S || V] expected by secp256k1.
+	// Reconstruct the compact signature [V || R || S] expected by secp256k1.
 	compactSig := make([]byte, 65)
 	copy(compactSig[1:], sigBytes[:64])
 	compactSig[0] = v + 27 // secp256k1 library compact format uses 27/28

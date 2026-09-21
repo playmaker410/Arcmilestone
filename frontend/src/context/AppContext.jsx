@@ -50,29 +50,60 @@ export default function AppProvider({ children }) {
     return () => window.removeEventListener('arc-auth-expired', handler)
   }, [])
 
-  const connectWallet = useCallback(async () => {
+  const connectWallet = useCallback(async (onSuccess) => {
     setIsWalletBusy(true)
     setAuthError('')
     try {
       // 1. Get wallet address from browser extension
-      const accounts = await getAccounts()
+      let accounts
+      try {
+        accounts = await getAccounts()
+      } catch (err) {
+        throw new Error('Could not access wallet. Make sure MetaMask is unlocked and try again.')
+      }
       if (!accounts || accounts.length === 0) throw new Error('No accounts found in wallet.')
       const address = accounts[0].toLowerCase()
 
       // 2. Get nonce from backend
-      const { nonce } = await api.nonce(address)
+      let nonce
+      try {
+        const result = await api.nonce(address)
+        nonce = result.nonce
+      } catch (err) {
+        throw new Error(`Could not get sign-in challenge: ${err.message}`)
+      }
 
       // 3. Sign the nonce with the wallet
-      const signature = await signMessage(address, nonce)
+      let signature
+      try {
+        signature = await signMessage(address, nonce)
+      } catch (err) {
+        // User rejected the prompt or wallet error
+        if (err.message?.toLowerCase().includes('reject') || err.message?.toLowerCase().includes('denied') || err.code === 4001) {
+          throw new Error('Signature request was rejected. Please approve the sign-in prompt in MetaMask.')
+        }
+        throw new Error(`Wallet signing failed: ${err.message || 'unknown error'}`)
+      }
 
       // 4. Verify signature with backend, receive token
-      const { token, user: backendUser } = await api.verify(address, nonce, signature)
+      let token, backendUser
+      try {
+        const result = await api.verify(address, nonce, signature)
+        token = result.token
+        backendUser = result.user
+      } catch (err) {
+        throw new Error(`Sign-in verification failed: ${err.message}`)
+      }
+
       api.setToken(token)
 
       // 5. Set auth state
       setUser(backendUser)
       setWalletAddress(address)
       setIsWalletConnected(true)
+
+      // 6. Navigate to dashboard if a callback was provided
+      if (typeof onSuccess === 'function') onSuccess()
     } catch (err) {
       setAuthError(err.message || 'Failed to connect wallet.')
     } finally {

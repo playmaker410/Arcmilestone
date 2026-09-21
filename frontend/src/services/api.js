@@ -3,6 +3,11 @@ const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 function getToken() { return localStorage.getItem('arc-token') }
 function setToken(t) { t ? localStorage.setItem('arc-token', t) : localStorage.removeItem('arc-token') }
 
+// Paths that are part of the auth handshake — a 401 here is an auth failure
+// (bad signature, expired nonce) not an expired session, so we must NOT fire
+// arc-auth-expired or the UI shows "session expired" instead of the real error.
+const AUTH_PATHS = ['/api/auth/nonce', '/api/auth/verify']
+
 async function request(path, options = {}) {
   const token = getToken()
   const headers = { 'Content-Type': 'application/json', ...options.headers }
@@ -10,7 +15,8 @@ async function request(path, options = {}) {
 
   const res = await fetch(`${BASE}${path}`, { ...options, headers })
 
-  if (res.status === 401) {
+  if (res.status === 401 && !AUTH_PATHS.includes(path)) {
+    // A protected endpoint rejected our session token — treat as expiry.
     setToken(null)
     window.dispatchEvent(new Event('arc-auth-expired'))
     throw new Error('Session expired')
