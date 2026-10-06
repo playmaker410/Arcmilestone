@@ -1,81 +1,121 @@
 package services
 
 import (
+	"arcmilestone/apperr"
+	"arcmilestone/models"
+	"arcmilestone/repositories"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
-
-	"arcmilestone/apperr"
-	"arcmilestone/models"
-	"arcmilestone/repositories"
 )
 
-// UserService handles user profile operations. Authentication identity comes
-// from the wallet address; this service manages the optional display fields.
+// UserService handles user account/profile operations.
+//
+// Wallet authentication itself belongs to AuthService.
+// UserService is responsible for retrieving users and updating
+// profile information such as the username.
+
 type UserService struct {
 	users *repositories.UserRepository
 }
 
 // NewUserService constructs the service.
+
 func NewUserService(users *repositories.UserRepository) *UserService {
 	return &UserService{users: users}
 }
 
-// UpdateProfileParams contains the fields a user may change on their profile.
-type UpdateProfileParams struct {
-	DisplayName *string
-	Email       *string
-}
+// NewUserService constructs the service.
 
-// GetByID returns a user by internal ID.
 func (s *UserService) GetByID(ctx context.Context, id uint64) (*models.User, error) {
 	user, err := s.users.FindByID(ctx, id)
+
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, apperr.ErrNotFound
 	}
+
 	if err != nil {
 		return nil, err
 	}
+
 	return user, nil
 }
 
-// UpdateProfile validates and applies profile changes for the given user.
-func (s *UserService) UpdateProfile(ctx context.Context, userID uint64, params UpdateProfileParams) (*models.User, error) {
-	if params.Email != nil {
-		trimmed := strings.TrimSpace(*params.Email)
-		if trimmed != "" && !strings.Contains(trimmed, "@") {
-			return nil, apperr.NewValidation(map[string]string{"email": "must be a valid email address"})
-		}
-		if trimmed == "" {
-			params.Email = nil
-		} else {
-			params.Email = &trimmed
-		}
-	}
-	if params.DisplayName != nil {
-		trimmed := strings.TrimSpace(*params.DisplayName)
-		if len(trimmed) > 100 {
-			return nil, apperr.NewValidation(map[string]string{"display_name": "must be 100 characters or fewer"})
-		}
-		if trimmed == "" {
-			params.DisplayName = nil
-		} else {
-			params.DisplayName = &trimmed
-		}
+// GetByWalletAddress returns the user associated with a wallet address.
+//
+// This is used to determine whether the wallet belongs to an existing
+// ArcMilestone user.
+
+func (s *UserService) GetByWalletAddress(ctx context.Context, WalletAdress string) (*models.User, error) {
+	WalletAdress = strings.TrimSpace(WalletAdress)
+
+	if WalletAdress == "" {
+		return nil, apperr.NewValidation(map[string]string{
+			"WalletAdress": "Walletadress is required",
+		})
 	}
 
-	err := s.users.UpdateProfile(ctx, userID, repositories.UpdateUserProfileParams{
-		DisplayName: params.DisplayName,
-		Email:       params.Email,
-	})
+	user, err := s.users.FindByWalletAddress(ctx, WalletAdress)
+
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, apperr.ErrNotFound
 	}
+
 	if err != nil {
-		return nil, fmt.Errorf("update profile: %w", err)
+		return nil, fmt.Errorf("find user by wallet address: %w", err)
 	}
 
-	return s.users.FindByID(ctx, userID)
+	return user, nil
+}
+
+// UpdateUsername sets the username chosen by the user after authentication.
+//
+// A new account is initially created without a username.
+// The dashboard can call this after authentication to complete the profile.
+
+func (s *UserService) UpdateUsername(ctx context.Context, UserID uint64, username string) (*models.User, error) {
+	username = strings.TrimSpace(username)
+
+	if username == "" {
+		return nil, apperr.NewValidation(map[string]string{
+			"Username": "Username is required",
+		})
+	}
+
+	if len(username) > 50 {
+		return nil, apperr.NewValidation(map[string]string{
+			"username": "username must be 50 characters or fewer",
+		})
+	}
+
+	err := s.users.UpdateUsername(ctx, UserID, repositories.UpdateUsernameParams{
+		Username: username,
+	},
+	)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, apperr.ErrNotFound
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("update username: %w", err)
+	}
+
+	return s.users.FindByID(ctx, UserID)
+}
+
+// IsUsernameAvailable checks if a username is available to claim.
+func (s *UserService) IsUsernameAvailable(ctx context.Context, username string) (bool, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return false, nil
+	}
+	exists, err := s.users.CheckUsernameExists(ctx, username)
+	if err != nil {
+		return false, err
+	}
+	// Available if it DOES NOT exist
+	return !exists, nil
 }

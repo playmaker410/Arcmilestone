@@ -20,6 +20,7 @@ func New(
 	appSvc *services.ApplicationService,
 	subSvc *services.SubmissionService,
 	notifSvc *services.NotificationService,
+	escrowSvc *services.JobEscrowService,
 	frontendURL string,
 ) http.Handler {
 	mux := http.NewServeMux()
@@ -35,6 +36,7 @@ func New(
 	appHandler := handlers.NewApplicationHandler(appSvc)
 	subHandler := handlers.NewSubmissionHandler(subSvc)
 	notifHandler := handlers.NewNotificationHandler(notifSvc)
+	escrowHandler := handlers.NewJobEscrowHandler(escrowSvc)
 
 	// -----------------------------------------------------------------------
 	// Auth routes
@@ -49,6 +51,7 @@ func New(
 	// -----------------------------------------------------------------------
 	mux.Handle("GET /api/users/me", auth(http.HandlerFunc(userHandler.GetMe)))
 	mux.Handle("PATCH /api/users/me", auth(http.HandlerFunc(userHandler.UpdateMe)))
+	mux.HandleFunc("GET /api/users/check-username", userHandler.CheckUsername)
 
 	// -----------------------------------------------------------------------
 	// Job routes
@@ -57,7 +60,8 @@ func New(
 	// GET /api/jobs is public but accepts optional auth for ?mine=true.
 	mux.Handle("GET /api/jobs", optAuth(http.HandlerFunc(jobHandler.List)))
 	mux.HandleFunc("GET /api/jobs/{id}", jobHandler.GetByID)
-	mux.Handle("PATCH /api/jobs/{id}", auth(http.HandlerFunc(jobHandler.Update)))
+	mux.Handle("PATCH /api/jobs/{id}", auth(http.HandlerFunc(jobHandler.Patch)))
+	mux.Handle("DELETE /api/jobs/{id}", auth(http.HandlerFunc(jobHandler.Delete)))
 	mux.Handle("POST /api/jobs/{id}/publish", auth(http.HandlerFunc(jobHandler.Publish)))
 	mux.Handle("POST /api/jobs/{id}/cancel", auth(http.HandlerFunc(jobHandler.Cancel)))
 
@@ -76,6 +80,14 @@ func New(
 	// -----------------------------------------------------------------------
 	mux.Handle("POST /api/jobs/{id}/submission", auth(http.HandlerFunc(subHandler.Submit)))
 	mux.Handle("GET /api/jobs/{id}/submission", auth(http.HandlerFunc(subHandler.GetByJob)))
+
+	// -----------------------------------------------------------------------
+	// Escrow routes
+	// POST records the on-chain escrow reference after createAndFundJobOpen confirms.
+	// GET returns the stored reference (public — needed by JobDetails to show tx hash).
+	// -----------------------------------------------------------------------
+	mux.Handle("POST /api/jobs/{id}/escrow", auth(http.HandlerFunc(escrowHandler.RecordEscrow)))
+	mux.HandleFunc("GET /api/jobs/{id}/escrow", escrowHandler.GetEscrow)
 
 	// -----------------------------------------------------------------------
 	// Notification routes

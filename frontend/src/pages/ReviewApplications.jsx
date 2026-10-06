@@ -10,6 +10,8 @@ import useApp from '../hooks/useApp'
 import { api } from '../services/api'
 import { formatDate, formatUSDC } from '../utils/format'
 import { canReviewApplications } from '../utils/permissions'
+import { assignFreelancerOnChain } from '../services/blockchain'
+import { pollJobForEscrowStatus } from '../utils/pollJob'
 
 export default function ReviewApplications() {
   const { id } = useParams()
@@ -26,6 +28,7 @@ export default function ReviewApplications() {
   const [notice, setNotice] = useState('')
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setJobLoading(true)
     api.getJob(id)
       .then((data) => {
@@ -40,6 +43,7 @@ export default function ReviewApplications() {
 
   useEffect(() => {
     if (!job) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAppsLoading(true)
     api.getJobApplications(job.id)
       .then((data) => setJobApplications(data.applications || []))
@@ -61,12 +65,28 @@ export default function ReviewApplications() {
         ...app,
         status: app.id === selected.id ? 'accepted' : app.status === 'pending' ? 'rejected' : app.status,
       })))
-      // Refresh job to pick up awaiting_funding status
-      const updatedJob = await api.getJob(job.id)
-      setJob(updatedJob)
-      refreshJob(job.id)
-      setSelected(null)
-      setNotice('Freelancer selected. Create and fund the escrow before work begins.')
+      
+      setNotice('Application accepted off-chain. Assigning on-chain...')
+      
+      // The open job should already be funded, we just assign the freelancer.
+      const blockchainJobId = job.blockchain_job_id || job.blockchainJobId
+      if (blockchainJobId) {
+        await assignFreelancerOnChain({
+          blockchainJobId,
+          freelancerAddress: selected.applicant_wallet,
+          clientAddress: addr,
+        })
+        
+        setNotice('Transaction confirmed. Waiting for backend to sync...')
+        const updatedJob = await pollJobForEscrowStatus(job.id, 'funded')
+        setJob(updatedJob)
+        refreshJob(job.id)
+        setSelected(null)
+        setNotice('Freelancer assigned and escrow funded successfully.')
+      } else {
+        throw new Error('No on-chain job ID found. Escrow was not funded properly.')
+      }
+
     } catch (err) {
       setNotice(`Failed to accept application: ${err.message}`)
     } finally {
@@ -83,7 +103,6 @@ export default function ReviewApplications() {
     }
   }
 
-  const marketplaceStatus = (job.marketplace_status || job.marketplaceStatus || '').toLowerCase()
 
   return (
     <>
@@ -100,14 +119,7 @@ export default function ReviewApplications() {
           <Alert variant="success" title="Application accepted" onDismiss={() => setNotice('')}>{notice}</Alert>
         </div>
       )}
-      {marketplaceStatus === 'awaiting_funding' && (
-        <div className="mb-5">
-          <Alert variant="warning" title="Escrow is not funded">
-            The selected freelancer should not start work yet.{' '}
-            <Link to={`/jobs/${job.id}`} className="font-bold underline">Create and Fund Escrow</Link>
-          </Alert>
-        </div>
-      )}
+
 
       {appsLoading ? (
         <div className="py-12 text-center text-sm text-slate-500">Loading applications…</div>
@@ -153,7 +165,7 @@ export default function ReviewApplications() {
         open={Boolean(selected)}
         onClose={() => !processing && setSelected(null)}
         title="Select this freelancer?"
-        description="You are selecting this freelancer for the job. The job will not begin until you create and fund the escrow."
+        description="You are selecting this freelancer for the job. The escrow will be assigned to them."
         actions={
           <>
             <button type="button" onClick={() => setSelected(null)} disabled={processing} className="btn-secondary">Go Back</button>

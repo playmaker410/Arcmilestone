@@ -6,7 +6,20 @@ import { shortenAddress } from '../utils/format'
 import Logo from './Logo'
 
 export default function Sidebar() {
-  const { wallet, isWalletConnected, isWalletBusy, connectWallet, disconnectWallet, unreadCount } = useApp()
+  const { user, wallet, isWalletConnected, isWalletBusy, connectWallet, disconnectWallet, unreadCount } = useApp()
+
+  /**
+   * Display name resolution:
+   *   • If the user has set a username, show it with an "@" prefix so other
+   *     users can immediately identify the handle format used across the platform.
+   *   • If no username yet (new user still completing setup, or fallback),
+   *     show the shortened wallet address as before.
+   *
+   * wallet.displayName already resolves username → shortenAddress in AppContext,
+   * so we only need to conditionally add the "@" prefix here.
+   */
+  const hasUsername = !!user?.username
+  const displayLabel = hasUsername ? `@${user.username}` : wallet.displayName
 
   return (
     <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-white/8 bg-ink-950 lg:flex">
@@ -42,7 +55,21 @@ export default function Sidebar() {
               <span className="size-2 rounded-full bg-mint-400" />
               Connected
             </div>
-            <p className="mt-3 text-sm font-bold text-white">{wallet.displayName}</p>
+
+            {/*
+             * Username display:
+             *   When the user has a username, show it prominently with the "@"
+             *   prefix in mint colour — this is the identity other users see.
+             *   When no username exists (edge case during setup), fall back to
+             *   the shortened wallet address in white.
+             */}
+            {hasUsername ? (
+              <p className="mt-3 text-sm font-bold text-mint-400">{displayLabel}</p>
+            ) : (
+              <p className="mt-3 text-sm font-bold text-white">{displayLabel}</p>
+            )}
+
+            {/* Always show the shortened wallet address below the display name */}
             <p className="mt-1 font-mono text-xs text-slate-400">{shortenAddress(wallet.address, 8, 6)}</p>
             <p className="mt-2 text-xs text-slate-500">{wallet.network}</p>
             <button

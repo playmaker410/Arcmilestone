@@ -13,8 +13,8 @@ import (
 	"arcmilestone/repositories"
 )
 
-// SubmissionService enforces v1 submission business rules.
-// One active submission per job; file contents never stored in MySQL.
+// SubmissionService enforces submission business rules.
+// One active submission per job; file contents are never stored in MySQL.
 type SubmissionService struct {
 	submissions *repositories.SubmissionRepository
 	jobs        *repositories.JobRepository
@@ -39,8 +39,8 @@ type CreateSubmissionParams struct {
 // Submit creates the submission row for a job.
 // Business rules:
 //   - caller must be the selected freelancer
-//   - job must be in_progress with escrow status funded
-//   - only one submission per job (enforced by UNIQUE constraint too)
+//   - job must be IN_PROGRESS
+//   - only one submission per job (also enforced by DB UNIQUE constraint)
 func (s *SubmissionService) Submit(ctx context.Context, jobID, callerUserID uint64, params CreateSubmissionParams) (*models.Submission, error) {
 	if err := validateSubmission(params); err != nil {
 		return nil, err
@@ -55,12 +55,12 @@ func (s *SubmissionService) Submit(ctx context.Context, jobID, callerUserID uint
 	}
 
 	// Only the selected freelancer may submit.
-	if job.SelectedFreelancerUserID == nil || *job.SelectedFreelancerUserID != callerUserID {
+	if job.SelectedFreelancerID == nil || *job.SelectedFreelancerID != callerUserID {
 		return nil, fmt.Errorf("%w: only the selected freelancer may submit work", apperr.ErrForbidden)
 	}
 
-	// Job must be in progress.
-	if job.MarketplaceStatus != models.MarketplaceStatusInProgress {
+	// Job must be IN_PROGRESS.
+	if job.Status != models.JobStatusInProgress {
 		return nil, fmt.Errorf("%w: job must be in progress before work can be submitted", apperr.ErrInvalidState)
 	}
 
@@ -86,8 +86,8 @@ func (s *SubmissionService) Submit(ctx context.Context, jobID, callerUserID uint
 	return s.submissions.FindByID(ctx, subID)
 }
 
-// GetByJobID returns the submission for a job. Any authenticated user who is
-// party to the job (creator or selected freelancer) may view it.
+// GetByJobID returns the submission for a job. Only the creator or selected
+// freelancer may view it.
 func (s *SubmissionService) GetByJobID(ctx context.Context, jobID, callerUserID uint64) (*models.Submission, error) {
 	job, err := s.jobs.FindByID(ctx, jobID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -98,7 +98,7 @@ func (s *SubmissionService) GetByJobID(ctx context.Context, jobID, callerUserID 
 	}
 
 	isCreator := job.CreatorUserID == callerUserID
-	isFreelancer := job.SelectedFreelancerUserID != nil && *job.SelectedFreelancerUserID == callerUserID
+	isFreelancer := job.SelectedFreelancerID != nil && *job.SelectedFreelancerID == callerUserID
 	if !isCreator && !isFreelancer {
 		return nil, apperr.ErrForbidden
 	}

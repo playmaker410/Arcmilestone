@@ -5,61 +5,38 @@ import (
 	"time"
 )
 
-// HiringMethod is the jobs.hiring_method ENUM value.
-type HiringMethod string
+// JobStatus mirrors the jobs.status column (VARCHAR(32)).
+// The default value in the database is 'OPEN'.
+type JobStatus string
 
 const (
-	HiringMethodOpen   HiringMethod = "open"
-	HiringMethodDirect HiringMethod = "direct"
+	JobStatusOpen                  JobStatus = "OPEN"
+	JobStatusReviewingApplications JobStatus = "REVIEWING_APPLICATIONS"
+	JobStatusInProgress            JobStatus = "IN_PROGRESS"
+	JobStatusCompleted             JobStatus = "COMPLETED"
+	JobStatusCancelled             JobStatus = "CANCELLED"
 )
 
-// MarketplaceStatus is the jobs.marketplace_status ENUM value.
-type MarketplaceStatus string
-
-const (
-	MarketplaceStatusDraft                 MarketplaceStatus = "draft"
-	MarketplaceStatusOpen                  MarketplaceStatus = "open"
-	MarketplaceStatusReviewingApplications MarketplaceStatus = "reviewing_applications"
-	MarketplaceStatusAwaitingFunding       MarketplaceStatus = "awaiting_funding"
-	MarketplaceStatusInProgress            MarketplaceStatus = "in_progress"
-	MarketplaceStatusCompleted             MarketplaceStatus = "completed"
-	MarketplaceStatusCancelled             MarketplaceStatus = "cancelled"
-)
-
-// EscrowStatus is the optional, indexed copy of the onchain escrow state.
-// The ArcMilestone contract remains authoritative for payment status.
-type EscrowStatus string
-
-const (
-	EscrowStatusFunded        EscrowStatus = "funded"
-	EscrowStatusWorkSubmitted EscrowStatus = "work_submitted"
-	EscrowStatusCompleted     EscrowStatus = "completed"
-	EscrowStatusRefunded      EscrowStatus = "refunded"
-)
-
-// Job corresponds to one row in the jobs table. Budget is kept as a decimal
-// string so DECIMAL(36,18) values remain exact and never pass through floats.
+// Job corresponds to one row in the jobs table.
+//
+// Budget is kept as a decimal string so DECIMAL(36,18) values remain exact
+// and never pass through floating-point arithmetic.
+//
+// RequiredSkills is stored as TEXT in MySQL (a JSON array string) and exposed
+// as raw JSON so callers can unmarshal or re-encode as needed.
+//
+// SelectedFreelancerID is NULL until the job creator selects an applicant.
 type Job struct {
-	ID                       uint64            `json:"id"`
-	CreatorUserID            uint64            `json:"creator_user_id"`
-	CreatorWallet            string            `json:"creator_wallet"`
-	HiringMethod             HiringMethod      `json:"hiring_method"`
-	Title                    string            `json:"title"`
-	Description              string            `json:"description"`
-	RequiredSkills           json.RawMessage   `json:"required_skills"`
-	Budget                   string            `json:"budget"`
-	ApplicationDeadline      *time.Time        `json:"application_deadline"`
-	DeliveryDeadline         time.Time         `json:"delivery_deadline"`
-	ReferenceURL             *string           `json:"reference_url"`
-	MarketplaceStatus        MarketplaceStatus `json:"marketplace_status"`
-	SelectedFreelancerUserID *uint64           `json:"selected_freelancer_user_id"`
-	SelectedFreelancerWallet *string           `json:"selected_freelancer_wallet"`
-	BlockchainJobID          *string           `json:"blockchain_job_id"`
-	ContractAddress          *string           `json:"contract_address"`
-	FundingTransactionHash   *string           `json:"funding_transaction_hash"`
-	MetadataHash             *string           `json:"metadata_hash"`
-	EscrowStatus             *EscrowStatus     `json:"escrow_status"`
-	ChainID                  *uint64           `json:"chain_id"`
-	CreatedAt                time.Time         `json:"created_at"`
-	UpdatedAt                time.Time         `json:"updated_at"`
+	ID                  uint64          `json:"id"`
+	CreatorUserID       uint64          `json:"creator_user_id"`
+	Title               string          `json:"title"`
+	Description         string          `json:"description"`
+	RequiredSkills      json.RawMessage `json:"required_skills"`
+	Budget              string          `json:"budget"`
+	ApplicationDeadline *time.Time      `json:"application_deadline"`
+	DeliveryDeadline    time.Time       `json:"delivery_deadline"`
+	Status              JobStatus       `json:"status"`
+	SelectedFreelancerID *uint64        `json:"selected_freelancer_id"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 }

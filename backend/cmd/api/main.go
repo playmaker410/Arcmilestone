@@ -55,6 +55,7 @@ func main() {
 	appRepo := repositories.NewApplicationRepository(db)
 	subRepo := repositories.NewSubmissionRepository(db)
 	notifRepo := repositories.NewNotificationRepository(db)
+	escrowRepo := repositories.NewJobEscrowRepository(db)
 
 	// =====================================================
 	// STEP 4: BUILD SERVICES
@@ -65,16 +66,30 @@ func main() {
 	appSvc := services.NewApplicationService(appRepo, jobRepo, userRepo, notifRepo)
 	subSvc := services.NewSubmissionService(subRepo, jobRepo, notifRepo)
 	notifSvc := services.NewNotificationService(notifRepo)
+	escrowSvc := services.NewJobEscrowService(escrowRepo, jobRepo)
 
 	// =====================================================
 	// STEP 5: BUILD THE HTTP SERVER
 	// =====================================================
-	handler := routes.New(db, authSvc, userSvc, jobSvc, appSvc, subSvc, notifSvc, cfg.FrontendURL)
+	handler := routes.New(db, authSvc, userSvc, jobSvc, appSvc, subSvc, notifSvc, escrowSvc, cfg.FrontendURL)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	// =====================================================
+	// STEP 5.5: START THE ARC LISTENER
+	// =====================================================
+	arcListener, err := services.NewArcListener(cfg.ArcRPCURL, cfg.ArcContractAddress, escrowRepo, jobRepo)
+	if err != nil {
+		log.Fatalf("failed to initialize Arc listener: %v", err)
+	}
+	listenerCtx, cancelListener := context.WithCancel(context.Background())
+	if arcListener != nil {
+		go arcListener.Start(listenerCtx)
+		log.Println("Arc listener started")
 	}
 
 	serverErrors := make(chan error, 1)
@@ -107,6 +122,7 @@ func main() {
 	// =====================================================
 	// STEP 7: SHUT DOWN GRACEFULLY
 	// =====================================================
+	cancelListener()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

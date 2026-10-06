@@ -11,106 +11,69 @@ import (
 )
 
 // JobRepository contains persistence operations for marketplace jobs.
-// Escrow and payment state remain authoritative on the Arc blockchain; this
-// repository stores only the offchain marketplace record and indexed copies of
-// onchain identifiers.
+// Escrow and payment state live in the separate job_escrows table and remain
+// authoritative on the Arc blockchain; this repository stores only the
+// offchain marketplace record.
 type JobRepository struct {
 	db *sql.DB
 }
-
-// CreateJobParams contains the fields accepted when a job is first inserted.
-// The database generates id, created_at, and updated_at.
-type CreateJobParams struct {
-	CreatorUserID       uint64
-	HiringMethod        models.HiringMethod
-	Title               string
-	Description         string
-	RequiredSkills      []byte // raw JSON array
-	Budget              string // exact decimal string, never float
-	ApplicationDeadline *time.Time
-	DeliveryDeadline    time.Time
-	ReferenceURL        *string
-	MarketplaceStatus   models.MarketplaceStatus
-}
-
-// UpdateJobParams contains the marketplace fields that may be edited before a
-// job is linked to a blockchain identity. Immutable IDs are intentionally absent.
-type UpdateJobParams struct {
-	Title               string
-	Description         string
-	RequiredSkills      []byte
-	Budget              string
-	ApplicationDeadline *time.Time
-	DeliveryDeadline    time.Time
-	ReferenceURL        *string
-}
-
-// LinkBlockchainJobParams captures the three values that must be set together
-// when the offchain job row is associated with an onchain escrow.
-type LinkBlockchainJobParams struct {
-	BlockchainJobID        string
-	ContractAddress        string
-	ChainID                uint64
-	FundingTransactionHash *string
-	MetadataHash           *string
-}
-
-const jobColumns = `
-	j.id,
-	j.creator_user_id,
-	u.wallet_address AS creator_wallet,
-	j.hiring_method,
-	j.title,
-	j.description,
-	j.required_skills,
-	j.budget,
-	j.application_deadline,
-	j.delivery_deadline,
-	j.reference_url,
-	j.marketplace_status,
-	j.selected_freelancer_user_id,
-	j.selected_freelancer_wallet,
-	j.blockchain_job_id,
-	j.contract_address,
-	j.funding_transaction_hash,
-	j.metadata_hash,
-	j.escrow_status,
-	j.chain_id,
-	j.created_at,
-	j.updated_at`
-
-const jobFrom = ` FROM jobs j JOIN users u ON u.id = j.creator_user_id `
 
 // NewJobRepository constructs a repository using an existing connection pool.
 func NewJobRepository(db *sql.DB) *JobRepository {
 	return &JobRepository{db: db}
 }
 
+// CreateJobParams contains the fields accepted when a job is first inserted.
+// The database generates id, created_at, updated_at, and defaults status to 'OPEN'.
+// selected_freelancer_id is always NULL on creation.
+type CreateJobParams struct {
+	CreatorUserID       uint64
+	Title               string
+	Description         string
+	RequiredSkills      []byte     // raw JSON, e.g. ["React","Go"]
+	Budget              string     // exact decimal string, never float
+	ApplicationDeadline *time.Time // optional
+	DeliveryDeadline    time.Time
+	Status              models.JobStatus
+}
+
+// jobColumns is the ordered column list used in every SELECT so scanJob
+// positions match exactly.
+const jobColumns = `
+	id,
+	creator_user_id,
+	title,
+	description,
+	required_skills,
+	budget,
+	application_deadline,
+	delivery_deadline,
+	status,
+	selected_freelancer_id,
+	created_at,
+	updated_at`
+
 // Create inserts a new job row and returns the database-generated ID.
 func (r *JobRepository) Create(ctx context.Context, params CreateJobParams) (uint64, error) {
 	result, err := r.db.ExecContext(ctx, `
 		INSERT INTO jobs (
 			creator_user_id,
-			hiring_method,
 			title,
 			description,
 			required_skills,
 			budget,
 			application_deadline,
 			delivery_deadline,
-			reference_url,
-			marketplace_status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		params.CreatorUserID,
-		params.HiringMethod,
 		params.Title,
 		params.Description,
 		params.RequiredSkills,
 		params.Budget,
 		nullableTime(params.ApplicationDeadline),
 		params.DeliveryDeadline.UTC(),
-		params.ReferenceURL,
-		params.MarketplaceStatus,
+		params.Status,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("create job: %w", err)
@@ -127,180 +90,142 @@ func (r *JobRepository) Create(ctx context.Context, params CreateJobParams) (uin
 	return uint64(lastID), nil
 }
 
-// FindByID returns a job by its internal database ID. A missing job is
-// returned as a wrapped sql.ErrNoRows.
+// FindByID returns a job by its internal database ID.
+// A missing row is returned as a wrapped sql.ErrNoRows.
 func (r *JobRepository) FindByID(ctx context.Context, id uint64) (*models.Job, error) {
 	job, err := scanJob(r.db.QueryRowContext(ctx,
-		"SELECT "+jobColumns+jobFrom+"WHERE j.id = ?",
+		"SELECT "+jobColumns+" FROM jobs WHERE id = ?",
 		id,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("find job by ID: %w", err)
 	}
-
 	return job, nil
 }
 
-// ListOpen returns jobs that are currently accepting applications, ordered
-// newest first. "Open" means marketplace_status = 'open'. The caller may use
-// the returned slice for display or pagination at a higher layer.
+// ListOpen returns jobs with status = 'OPEN', ordered newest first.
 func (r *JobRepository) ListOpen(ctx context.Context) ([]*models.Job, error) {
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT "+jobColumns+jobFrom+`
-		WHERE j.marketplace_status = 'open'
-		ORDER BY j.created_at DESC, j.id DESC`,
+		"SELECT "+jobColumns+`
+		FROM jobs
+		WHERE status = 'OPEN'
+		ORDER BY created_at DESC, id DESC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list open jobs: %w", err)
 	}
 	defer rows.Close()
-
 	return collectJobs(rows)
 }
 
 // ListByCreator returns all jobs created by a given user, newest first.
 func (r *JobRepository) ListByCreator(ctx context.Context, creatorUserID uint64) ([]*models.Job, error) {
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT "+jobColumns+jobFrom+`
-		WHERE j.creator_user_id = ?
-		ORDER BY j.created_at DESC, j.id DESC`,
+		"SELECT "+jobColumns+`
+		FROM jobs
+		WHERE creator_user_id = ?
+		ORDER BY created_at DESC, id DESC`,
 		creatorUserID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs by creator: %w", err)
 	}
 	defer rows.Close()
-
 	return collectJobs(rows)
 }
 
-// ListBySelectedFreelancer returns all jobs assigned to a given freelancer,
-// newest first.
+// ListBySelectedFreelancer returns all jobs where the given user has been
+// chosen as the selected freelancer, newest first.
 func (r *JobRepository) ListBySelectedFreelancer(ctx context.Context, freelancerUserID uint64) ([]*models.Job, error) {
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT "+jobColumns+jobFrom+`
-		WHERE j.selected_freelancer_user_id = ?
-		ORDER BY j.created_at DESC, j.id DESC`,
+		"SELECT "+jobColumns+`
+		FROM jobs
+		WHERE selected_freelancer_id = ?
+		ORDER BY created_at DESC, id DESC`,
 		freelancerUserID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs by selected freelancer: %w", err)
 	}
 	defer rows.Close()
-
 	return collectJobs(rows)
 }
 
-// Update overwrites the editable marketplace fields of a job. It does not
-// touch creator_user_id, hiring_method, blockchain fields, or status fields.
-func (r *JobRepository) Update(ctx context.Context, jobID uint64, params UpdateJobParams) error {
+// UpdateDetailsParams contains the mutable fields a creator may change after
+// a job is posted. Budget is intentionally absent — it is locked at creation
+// time and must never be altered once workers have seen the listing.
+type UpdateDetailsParams struct {
+	Title               string
+	Description         string
+	RequiredSkills      []byte     // raw JSON
+	ApplicationDeadline *time.Time // nil clears the deadline (not allowed — always required now)
+	DeliveryDeadline    time.Time
+}
+
+// UpdateDetails overwrites the editable metadata columns on a job.
+// The budget, status, creator_user_id, and selected_freelancer_id columns are
+// never touched by this method.
+func (r *JobRepository) UpdateDetails(ctx context.Context, jobID uint64, params UpdateDetailsParams) error {
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE jobs
-		SET title = ?,
-		    description = ?,
-		    required_skills = ?,
-		    budget = ?,
-		    application_deadline = ?,
-		    delivery_deadline = ?,
-		    reference_url = ?
+		SET
+			title               = ?,
+			description         = ?,
+			required_skills     = ?,
+			application_deadline = ?,
+			delivery_deadline   = ?
 		WHERE id = ?`,
 		params.Title,
 		params.Description,
 		params.RequiredSkills,
-		params.Budget,
 		nullableTime(params.ApplicationDeadline),
 		params.DeliveryDeadline.UTC(),
-		params.ReferenceURL,
 		jobID,
 	)
 	if err != nil {
-		return fmt.Errorf("update job: %w", err)
+		return fmt.Errorf("update job details: %w", err)
 	}
-
-	return requireOneAffectedRow(ctx, r.db, "jobs", jobID, result, "update job")
+	return requireOneAffectedRow(ctx, r.db, "jobs", jobID, result, "update job details")
 }
 
-// SelectFreelancer stores the chosen freelancer's user ID and wallet address on
-// a job. Business rules (e.g. only the creator may do this) belong to the service layer.
-func (r *JobRepository) SelectFreelancer(ctx context.Context, jobID uint64, freelancerUserID uint64, freelancerWallet string) error {
+// UpdateStatus sets only the status column on a job.
+// Business rules about which transitions are allowed belong to the service layer.
+func (r *JobRepository) UpdateStatus(ctx context.Context, jobID uint64, status models.JobStatus) error {
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE jobs
-		SET selected_freelancer_user_id = ?,
-		    selected_freelancer_wallet = ?
+		SET status = ?
+		WHERE id = ?`,
+		status,
+		jobID,
+	)
+	if err != nil {
+		return fmt.Errorf("update job status: %w", err)
+	}
+	return requireOneAffectedRow(ctx, r.db, "jobs", jobID, result, "update job status")
+}
+
+// SelectFreelancer stores the chosen freelancer's user ID on a job.
+// Business rules (only the creator may do this, job must be in the right
+// state, etc.) belong to the service layer.
+func (r *JobRepository) SelectFreelancer(ctx context.Context, jobID uint64, freelancerUserID uint64) error {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET selected_freelancer_id = ?
 		WHERE id = ?`,
 		freelancerUserID,
-		normalizeWalletAddress(freelancerWallet),
 		jobID,
 	)
 	if err != nil {
 		return fmt.Errorf("select freelancer for job: %w", err)
 	}
-
 	return requireOneAffectedRow(ctx, r.db, "jobs", jobID, result, "select freelancer for job")
 }
 
-// UpdateMarketplaceStatus sets only the marketplace_status column.
-func (r *JobRepository) UpdateMarketplaceStatus(ctx context.Context, jobID uint64, status models.MarketplaceStatus) error {
-	result, err := r.db.ExecContext(ctx, `
-		UPDATE jobs
-		SET marketplace_status = ?
-		WHERE id = ?`,
-		status,
-		jobID,
-	)
-	if err != nil {
-		return fmt.Errorf("update job marketplace status: %w", err)
-	}
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
-	return requireOneAffectedRow(ctx, r.db, "jobs", jobID, result, "update job marketplace status")
-}
-
-// UpdateEscrowStatus sets only the escrow_status column. This is an indexed copy
-// of the onchain state; the Arc contract remains authoritative.
-func (r *JobRepository) UpdateEscrowStatus(ctx context.Context, jobID uint64, status models.EscrowStatus) error {
-	result, err := r.db.ExecContext(ctx, `
-		UPDATE jobs
-		SET escrow_status = ?
-		WHERE id = ?`,
-		status,
-		jobID,
-	)
-	if err != nil {
-		return fmt.Errorf("update job escrow status: %w", err)
-	}
-
-	return requireOneAffectedRow(ctx, r.db, "jobs", jobID, result, "update job escrow status")
-}
-
-// LinkBlockchainJob stores the blockchain_job_id, contract_address, chain_id,
-// and optionally the funding transaction hash and metadata hash on a job row.
-// These three blockchain identity values must be set atomically per the schema
-// CHECK constraint chk_jobs_blockchain_identity_complete.
-func (r *JobRepository) LinkBlockchainJob(ctx context.Context, jobID uint64, params LinkBlockchainJobParams) error {
-	result, err := r.db.ExecContext(ctx, `
-		UPDATE jobs
-		SET blockchain_job_id = ?,
-		    contract_address = ?,
-		    chain_id = ?,
-		    funding_transaction_hash = ?,
-		    metadata_hash = ?
-		WHERE id = ?`,
-		params.BlockchainJobID,
-		params.ContractAddress,
-		params.ChainID,
-		params.FundingTransactionHash,
-		params.MetadataHash,
-		jobID,
-	)
-	if err != nil {
-		return fmt.Errorf("link blockchain job: %w", err)
-	}
-
-	return requireOneAffectedRow(ctx, r.db, "jobs", jobID, result, "link blockchain job")
-}
-
-// collectJobs iterates sql.Rows and scans each row into a Job. It always closes
-// the rows and checks for iteration errors.
+// collectJobs iterates sql.Rows and scans each into a Job.
 func collectJobs(rows *sql.Rows) ([]*models.Job, error) {
 	jobs := make([]*models.Job, 0)
 	for rows.Next() {
@@ -313,50 +238,33 @@ func collectJobs(rows *sql.Rows) ([]*models.Job, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate job rows: %w", err)
 	}
-
 	return jobs, nil
 }
 
+// scanJob reads a row into a Job. Column order must match jobColumns exactly.
 func scanJob(row rowScanner) (*models.Job, error) {
 	j := new(models.Job)
-	var escrowStatus sql.NullString
 	if err := row.Scan(
 		&j.ID,
 		&j.CreatorUserID,
-		&j.CreatorWallet,
-		&j.HiringMethod,
 		&j.Title,
 		&j.Description,
 		&j.RequiredSkills,
 		&j.Budget,
 		&j.ApplicationDeadline,
 		&j.DeliveryDeadline,
-		&j.ReferenceURL,
-		&j.MarketplaceStatus,
-		&j.SelectedFreelancerUserID,
-		&j.SelectedFreelancerWallet,
-		&j.BlockchainJobID,
-		&j.ContractAddress,
-		&j.FundingTransactionHash,
-		&j.MetadataHash,
-		&escrowStatus,
-		&j.ChainID,
+		&j.Status,
+		&j.SelectedFreelancerID,
 		&j.CreatedAt,
 		&j.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
-
-	if escrowStatus.Valid {
-		es := models.EscrowStatus(escrowStatus.String)
-		j.EscrowStatus = &es
-	}
-
 	return j, nil
 }
 
-// nullableTime converts a *time.Time to a value suitable for a nullable column.
-// A nil pointer stores NULL; a non-nil pointer stores the UTC time.
+// nullableTime converts a *time.Time to a value suitable for a nullable
+// DATETIME column. A nil pointer stores NULL; a non-nil pointer stores UTC.
 func nullableTime(t *time.Time) interface{} {
 	if t == nil {
 		return nil
@@ -364,9 +272,13 @@ func nullableTime(t *time.Time) interface{} {
 	return t.UTC()
 }
 
-// requireOneAffectedRow checks whether an UPDATE touched exactly one row. When
-// zero rows were affected it distinguishes "row does not exist" from "value was
-// already identical" with a follow-up SELECT.
+// requireOneAffectedRow checks that an UPDATE touched exactly one row.
+// Zero affected rows triggers a follow-up SELECT to distinguish "row does
+// not exist" from "value was already identical" (MySQL reports 0 in both
+// cases when the value is unchanged).
+//
+// table is the plain table name used in the confirmation SELECT; it must
+// not contain any user-controlled input.
 func requireOneAffectedRow(ctx context.Context, db *sql.DB, table string, id uint64, result sql.Result, op string) error {
 	affected, err := result.RowsAffected()
 	if err != nil {
@@ -387,6 +299,12 @@ func requireOneAffectedRow(ctx context.Context, db *sql.DB, table string, id uin
 		return fmt.Errorf("%s: confirm existence: %w", op, err)
 	}
 
-	// Row exists; values were already identical — treat as success.
+	// Row exists; value was already identical — treat as success.
 	return nil
+}
+
+// Delete completely removes a job from the database.
+func (r *JobRepository) Delete(ctx context.Context, id uint64) error {
+	_, err := r.db.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", id)
+	return err
 }

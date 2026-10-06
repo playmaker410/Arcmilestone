@@ -42,7 +42,7 @@ type CreateApplicationParams struct {
 
 // Apply submits an application from applicantUserID to jobID.
 // Business rules enforced:
-//   - job must be open for applications
+//   - job must be OPEN or REVIEWING_APPLICATIONS
 //   - application deadline must not have passed
 //   - job creator cannot apply to their own job
 //   - same user cannot apply twice (also backed by DB UNIQUE constraint)
@@ -59,9 +59,8 @@ func (s *ApplicationService) Apply(ctx context.Context, jobID, applicantUserID u
 		return nil, err
 	}
 
-	// Only open or reviewing-applications jobs accept new applications.
-	if job.MarketplaceStatus != models.MarketplaceStatusOpen &&
-		job.MarketplaceStatus != models.MarketplaceStatusReviewingApplications {
+	// Only OPEN or REVIEWING_APPLICATIONS jobs accept new applications.
+	if job.Status != models.JobStatusOpen && job.Status != models.JobStatusReviewingApplications {
 		return nil, fmt.Errorf("%w: this job is not accepting applications", apperr.ErrInvalidState)
 	}
 
@@ -95,9 +94,9 @@ func (s *ApplicationService) Apply(ctx context.Context, jobID, applicantUserID u
 		return nil, fmt.Errorf("create application: %w", err)
 	}
 
-	// Move job to reviewing_applications when the first application arrives.
-	if job.MarketplaceStatus == models.MarketplaceStatusOpen {
-		_ = s.jobs.UpdateMarketplaceStatus(ctx, jobID, models.MarketplaceStatusReviewingApplications)
+	// Move job to REVIEWING_APPLICATIONS when the first application arrives.
+	if job.Status == models.JobStatusOpen {
+		_ = s.jobs.UpdateStatus(ctx, jobID, models.JobStatusReviewingApplications)
 	}
 
 	// Notify the job creator.
@@ -172,23 +171,13 @@ func (s *ApplicationService) Accept(ctx context.Context, applicationID, callerUs
 		}
 	}
 
-	// Record the selected freelancer on the job using a lookup for wallet address.
-	// We need the applicant's wallet — look up the user record.
-	// The wallet is stored on the user row; we use FindByID via the users repo.
-	// For now, SelectFreelancer requires the wallet string — pass empty and let
-	// the service layer caller supply it, OR we require users repo here.
-	// To keep this service focused we store freelancer_user_id and leave wallet
-	// update to a user-lookup helper. We inject what we need.
-	freelancer, userErr := s.users.FindByID(ctx, app.ApplicantUserID)
-	if userErr != nil {
-		return nil, userErr
-	}
-	if err := s.jobs.SelectFreelancer(ctx, app.JobID, app.ApplicantUserID, freelancer.WalletAddress); err != nil {
+	// Record the selected freelancer on the job.
+	if err := s.jobs.SelectFreelancer(ctx, app.JobID, app.ApplicantUserID); err != nil {
 		return nil, err
 	}
 
-	// Move job to awaiting_funding.
-	_ = s.jobs.UpdateMarketplaceStatus(ctx, app.JobID, models.MarketplaceStatusAwaitingFunding)
+	// Move job to IN_PROGRESS.
+	_ = s.jobs.UpdateStatus(ctx, app.JobID, models.JobStatusInProgress)
 
 	// Notify the selected freelancer.
 	jobID := app.JobID

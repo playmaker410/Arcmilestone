@@ -15,6 +15,13 @@ describe("ArcMilestone", async function () {
   const SECOND_METADATA_HASH = keccak256(toBytes("ipfs://second-job"));
   const DELIVERABLE_HASH = keccak256(toBytes("ipfs://submitted-work"));
 
+  // JobStatus enum values (must match contract order)
+  const STATUS_AWAITING_FREELANCER = 0;
+  const STATUS_FUNDED = 1;
+  const STATUS_WORK_SUBMITTED = 2;
+  const STATUS_COMPLETED = 3;
+  const STATUS_REFUNDED = 4;
+
   async function deployArcMilestoneFixture() {
     const [client, freelancer, stranger, secondFreelancer] =
       await viem.getWalletClients();
@@ -32,22 +39,34 @@ describe("ArcMilestone", async function () {
     };
   }
 
-  async function createFundedJob() {
+  async function createOpenJob() {
     const fixture = await networkHelpers.loadFixture(
       deployArcMilestoneFixture,
     );
-    const { client, freelancer, escrow, deadline } = fixture;
+    const { client, escrow, deadline } = fixture;
 
-    await escrow.write.createAndFundJob(
-      [freelancer.account.address, deadline, METADATA_HASH],
+    await escrow.write.createAndFundJobOpen(
+      [deadline, METADATA_HASH],
       { account: client.account, value: PAYMENT },
     );
 
     return fixture;
   }
 
+  async function createAssignedJob() {
+    const fixture = await createOpenJob();
+    const { client, freelancer, escrow } = fixture;
+
+    await escrow.write.assignFreelancer(
+      [1n, freelancer.account.address],
+      { account: client.account },
+    );
+
+    return fixture;
+  }
+
   async function createSubmittedJob() {
-    const fixture = await createFundedJob();
+    const fixture = await createAssignedJob();
     const { freelancer, escrow } = fixture;
 
     await escrow.write.submitWork([1n, DELIVERABLE_HASH], {
@@ -58,37 +77,30 @@ describe("ArcMilestone", async function () {
   }
 
   // =====================================================
-  // CREATION AND FUNDING
+  // CREATION AND FUNDING (open — freelancer assigned later)
   // =====================================================
 
-  describe("createAndFundJob", function () {
-    it("creates one funded job and stores sequential ID 1", async function () {
-      const { escrow } = await createFundedJob();
+  describe("createAndFundJobOpen", function () {
+    it("creates a job with AwaitingFreelancer status and zero freelancer", async function () {
+      const { escrow } = await createOpenJob();
       const job = await escrow.read.getJob([1n]);
 
       assert.equal(job.id, 1n);
-      assert.equal(job.status, 0);
+      assert.equal(job.status, STATUS_AWAITING_FREELANCER);
+      assert.equal(job.freelancer, zeroAddress);
       assert.equal(await escrow.read.getJobCount(), 1n);
     });
 
     it("stores the calling wallet as the client", async function () {
-      const { client, escrow } = await createFundedJob();
+      const { client, escrow } = await createOpenJob();
       assert.equal(
         (await escrow.read.getJob([1n])).client.toLowerCase(),
         client.account.address.toLowerCase(),
       );
     });
 
-    it("stores the selected freelancer", async function () {
-      const { freelancer, escrow } = await createFundedJob();
-      assert.equal(
-        (await escrow.read.getJob([1n])).freelancer.toLowerCase(),
-        freelancer.account.address.toLowerCase(),
-      );
-    });
-
     it("stores and holds the exact native USDC amount", async function () {
-      const { escrow } = await createFundedJob();
+      const { escrow } = await createOpenJob();
       assert.equal((await escrow.read.getJob([1n])).amount, PAYMENT);
       assert.equal(
         await publicClient.getBalance({ address: escrow.address }),
@@ -96,78 +108,33 @@ describe("ArcMilestone", async function () {
       );
     });
 
-    it("stores deadline, metadata, and an empty deliverable", async function () {
-      const { escrow, deadline } = await createFundedJob();
-      const job = await escrow.read.getJob([1n]);
-
-      assert.equal(job.deadline, deadline);
-      assert.equal(job.metadataHash, METADATA_HASH);
-      assert.equal(job.deliverableHash, `0x${"0".repeat(64)}`);
-    });
-
     it("increases totalLocked by the complete deposit", async function () {
-      const { escrow } = await createFundedJob();
+      const { escrow } = await createOpenJob();
       assert.equal(await escrow.read.totalLocked(), PAYMENT);
     });
 
-    it("emits JobCreatedAndFunded with complete details", async function () {
-      const { client, freelancer, escrow, deadline } =
+    it("emits JobCreatedAndFundedOpen with complete details", async function () {
+      const { client, escrow, deadline } =
         await networkHelpers.loadFixture(deployArcMilestoneFixture);
 
       await viem.assertions.emitWithArgs(
-        escrow.write.createAndFundJob(
-          [freelancer.account.address, deadline, METADATA_HASH],
+        escrow.write.createAndFundJobOpen(
+          [deadline, METADATA_HASH],
           { account: client.account, value: PAYMENT },
         ),
         escrow,
-        "JobCreatedAndFunded",
-        [
-          1n,
-          client.account.address,
-          freelancer.account.address,
-          PAYMENT,
-          deadline,
-          METADATA_HASH,
-        ],
-      );
-    });
-
-    it("rejects the zero freelancer address", async function () {
-      const { client, escrow, deadline } =
-        await networkHelpers.loadFixture(deployArcMilestoneFixture);
-
-      await viem.assertions.revertWithCustomError(
-        escrow.write.createAndFundJob(
-          [zeroAddress, deadline, METADATA_HASH],
-          { account: client.account, value: PAYMENT },
-        ),
-        escrow,
-        "ZeroFreelancerAddress",
-      );
-    });
-
-    it("rejects a client who hires themselves", async function () {
-      const { client, escrow, deadline } =
-        await networkHelpers.loadFixture(deployArcMilestoneFixture);
-
-      await viem.assertions.revertWithCustomErrorWithArgs(
-        escrow.write.createAndFundJob(
-          [client.account.address, deadline, METADATA_HASH],
-          { account: client.account, value: PAYMENT },
-        ),
-        escrow,
-        "ClientCannotBeFreelancer",
-        [client.account.address],
+        "JobCreatedAndFundedOpen",
+        [1n, client.account.address, PAYMENT, deadline, METADATA_HASH],
       );
     });
 
     it("rejects zero payment", async function () {
-      const { client, freelancer, escrow, deadline } =
+      const { client, escrow, deadline } =
         await networkHelpers.loadFixture(deployArcMilestoneFixture);
 
       await viem.assertions.revertWithCustomError(
-        escrow.write.createAndFundJob(
-          [freelancer.account.address, deadline, METADATA_HASH],
+        escrow.write.createAndFundJobOpen(
+          [deadline, METADATA_HASH],
           { account: client.account, value: 0n },
         ),
         escrow,
@@ -176,13 +143,13 @@ describe("ArcMilestone", async function () {
     });
 
     it("rejects a current or expired deadline", async function () {
-      const { client, freelancer, escrow } =
+      const { client, escrow } =
         await networkHelpers.loadFixture(deployArcMilestoneFixture);
       const now = BigInt(await networkHelpers.time.latest());
 
       await viem.assertions.revertWithCustomError(
-        escrow.write.createAndFundJob(
-          [freelancer.account.address, now, METADATA_HASH],
+        escrow.write.createAndFundJobOpen(
+          [now, METADATA_HASH],
           { account: client.account, value: PAYMENT },
         ),
         escrow,
@@ -191,17 +158,107 @@ describe("ArcMilestone", async function () {
     });
 
     it("rejects an empty metadata hash", async function () {
-      const { client, freelancer, escrow, deadline } =
+      const { client, escrow, deadline } =
         await networkHelpers.loadFixture(deployArcMilestoneFixture);
 
       await viem.assertions.revertWithCustomError(
-        escrow.write.createAndFundJob(
-          [freelancer.account.address, deadline, `0x${"0".repeat(64)}`],
+        escrow.write.createAndFundJobOpen(
+          [deadline, `0x${"0".repeat(64)}`],
           { account: client.account, value: PAYMENT },
         ),
         escrow,
         "EmptyMetadataHash",
       );
+    });
+  });
+
+  // =====================================================
+  // ASSIGN FREELANCER
+  // =====================================================
+
+  describe("assignFreelancer", function () {
+    it("sets the freelancer and changes status to Funded", async function () {
+      const { freelancer, escrow } = await createAssignedJob();
+      const job = await escrow.read.getJob([1n]);
+
+      assert.equal(job.freelancer.toLowerCase(), freelancer.account.address.toLowerCase());
+      assert.equal(job.status, STATUS_FUNDED);
+    });
+
+    it("emits FreelancerAssigned", async function () {
+      const { client, freelancer, escrow } = await createOpenJob();
+
+      await viem.assertions.emitWithArgs(
+        escrow.write.assignFreelancer(
+          [1n, freelancer.account.address],
+          { account: client.account },
+        ),
+        escrow,
+        "FreelancerAssigned",
+        [1n, client.account.address, freelancer.account.address],
+      );
+    });
+
+    it("rejects assignment by a stranger", async function () {
+      const { stranger, freelancer, escrow } = await createOpenJob();
+
+      await viem.assertions.revertWithCustomError(
+        escrow.write.assignFreelancer(
+          [1n, freelancer.account.address],
+          { account: stranger.account },
+        ),
+        escrow,
+        "CallerIsNotClient",
+      );
+    });
+
+    it("rejects zero freelancer address", async function () {
+      const { client, escrow } = await createOpenJob();
+
+      await viem.assertions.revertWithCustomError(
+        escrow.write.assignFreelancer(
+          [1n, zeroAddress],
+          { account: client.account },
+        ),
+        escrow,
+        "ZeroFreelancerAddress",
+      );
+    });
+
+    it("rejects client assigning themselves", async function () {
+      const { client, escrow } = await createOpenJob();
+
+      await viem.assertions.revertWithCustomError(
+        escrow.write.assignFreelancer(
+          [1n, client.account.address],
+          { account: client.account },
+        ),
+        escrow,
+        "ClientCannotBeFreelancer",
+      );
+    });
+
+    it("rejects assignment on a job that already has a freelancer (Funded)", async function () {
+      const { client, freelancer, secondFreelancer, escrow } = await createAssignedJob();
+
+      await viem.assertions.revertWithCustomError(
+        escrow.write.assignFreelancer(
+          [1n, secondFreelancer.account.address],
+          { account: client.account },
+        ),
+        escrow,
+        "JobNotAwaitingFreelancer",
+      );
+    });
+
+    it("allows submitWork after freelancer is assigned", async function () {
+      const { freelancer, escrow } = await createAssignedJob();
+
+      await escrow.write.submitWork([1n, DELIVERABLE_HASH], {
+        account: freelancer.account,
+      });
+
+      assert.equal((await escrow.read.getJob([1n])).status, STATUS_WORK_SUBMITTED);
     });
   });
 
@@ -215,12 +272,12 @@ describe("ArcMilestone", async function () {
       const job = await escrow.read.getJob([1n]);
 
       assert.equal(job.deliverableHash, DELIVERABLE_HASH);
-      assert.equal(job.status, 1);
+      assert.equal(job.status, STATUS_WORK_SUBMITTED);
       assert.equal(await escrow.read.totalLocked(), PAYMENT);
     });
 
     it("emits WorkSubmitted", async function () {
-      const { freelancer, escrow } = await createFundedJob();
+      const { freelancer, escrow } = await createAssignedJob();
 
       await viem.assertions.emitWithArgs(
         escrow.write.submitWork([1n, DELIVERABLE_HASH], {
@@ -233,7 +290,7 @@ describe("ArcMilestone", async function () {
     });
 
     it("rejects submission by the client", async function () {
-      const { client, escrow } = await createFundedJob();
+      const { client, escrow } = await createAssignedJob();
 
       await viem.assertions.revertWithCustomErrorWithArgs(
         escrow.write.submitWork([1n, DELIVERABLE_HASH], {
@@ -246,7 +303,7 @@ describe("ArcMilestone", async function () {
     });
 
     it("rejects submission by a stranger", async function () {
-      const { stranger, escrow } = await createFundedJob();
+      const { stranger, escrow } = await createAssignedJob();
 
       await viem.assertions.revertWithCustomError(
         escrow.write.submitWork([1n, DELIVERABLE_HASH], {
@@ -257,8 +314,20 @@ describe("ArcMilestone", async function () {
       );
     });
 
+    it("rejects submission on an AwaitingFreelancer job", async function () {
+      const { client, escrow } = await createOpenJob();
+
+      await viem.assertions.revertWithCustomError(
+        escrow.write.submitWork([1n, DELIVERABLE_HASH], {
+          account: client.account,
+        }),
+        escrow,
+        "CallerIsNotFreelancer",
+      );
+    });
+
     it("rejects an empty deliverable hash", async function () {
-      const { freelancer, escrow } = await createFundedJob();
+      const { freelancer, escrow } = await createAssignedJob();
 
       await viem.assertions.revertWithCustomError(
         escrow.write.submitWork([1n, `0x${"0".repeat(64)}`], {
@@ -270,7 +339,7 @@ describe("ArcMilestone", async function () {
     });
 
     it("rejects submission after the deadline", async function () {
-      const { freelancer, escrow, deadline } = await createFundedJob();
+      const { freelancer, escrow, deadline } = await createAssignedJob();
       await networkHelpers.time.increaseTo(deadline + 1n);
 
       await viem.assertions.revertWithCustomError(
@@ -291,7 +360,7 @@ describe("ArcMilestone", async function () {
         }),
         escrow,
         "WrongJobStatus",
-        [1n, 1, 0],
+        [1n, STATUS_WORK_SUBMITTED, STATUS_FUNDED],
       );
     });
   });
@@ -323,13 +392,13 @@ describe("ArcMilestone", async function () {
     });
 
     it("requires WorkSubmitted status", async function () {
-      const { client, escrow } = await createFundedJob();
+      const { client, escrow } = await createAssignedJob();
 
       await viem.assertions.revertWithCustomErrorWithArgs(
         escrow.write.approveAndRelease([1n], { account: client.account }),
         escrow,
         "WrongJobStatus",
-        [1n, 0, 1],
+        [1n, STATUS_FUNDED, STATUS_WORK_SUBMITTED],
       );
     });
 
@@ -349,7 +418,7 @@ describe("ArcMilestone", async function () {
       const { client, escrow } = await createSubmittedJob();
       await escrow.write.approveAndRelease([1n], { account: client.account });
 
-      assert.equal((await escrow.read.getJob([1n])).status, 2);
+      assert.equal((await escrow.read.getJob([1n])).status, STATUS_COMPLETED);
       assert.equal(await escrow.read.totalLocked(), 0n);
       assert.equal(
         await publicClient.getBalance({ address: escrow.address }),
@@ -376,7 +445,7 @@ describe("ArcMilestone", async function () {
         escrow.write.approveAndRelease([1n], { account: client.account }),
         escrow,
         "WrongJobStatus",
-        [1n, 2, 1],
+        [1n, STATUS_COMPLETED, STATUS_WORK_SUBMITTED],
       );
     });
   });
@@ -387,7 +456,7 @@ describe("ArcMilestone", async function () {
 
   describe("refundExpiredJob", function () {
     it("rejects a refund before the deadline", async function () {
-      const { client, escrow } = await createFundedJob();
+      const { client, escrow } = await createAssignedJob();
 
       await viem.assertions.revertWithCustomError(
         escrow.write.refundExpiredJob([1n], { account: client.account }),
@@ -397,7 +466,7 @@ describe("ArcMilestone", async function () {
     });
 
     it("rejects a refund by anyone except the client", async function () {
-      const { stranger, escrow, deadline } = await createFundedJob();
+      const { stranger, escrow, deadline } = await createAssignedJob();
       await networkHelpers.time.increaseTo(deadline + 1n);
 
       await viem.assertions.revertWithCustomErrorWithArgs(
@@ -408,8 +477,8 @@ describe("ArcMilestone", async function () {
       );
     });
 
-    it("returns the exact escrow amount after expiry", async function () {
-      const { client, escrow, deadline } = await createFundedJob();
+    it("returns the exact escrow amount after expiry (Funded job)", async function () {
+      const { client, escrow, deadline } = await createAssignedJob();
       await networkHelpers.time.increaseTo(deadline + 1n);
 
       await viem.assertions.balancesHaveChanged(
@@ -421,12 +490,25 @@ describe("ArcMilestone", async function () {
       );
     });
 
-    it("marks Refunded and decreases locked accounting", async function () {
-      const { client, escrow, deadline } = await createFundedJob();
+    it("refunds an AwaitingFreelancer job after deadline passes", async function () {
+      const { client, escrow, deadline } = await createOpenJob();
+      await networkHelpers.time.increaseTo(deadline + 1n);
+
+      await viem.assertions.balancesHaveChanged(
+        escrow.write.refundExpiredJob([1n], { account: client.account }),
+        [
+          { address: escrow.address, amount: -PAYMENT },
+          { address: client.account.address, amount: PAYMENT },
+        ],
+      );
+    });
+
+    it("marks Refunded and decreases locked accounting (Funded job)", async function () {
+      const { client, escrow, deadline } = await createAssignedJob();
       await networkHelpers.time.increaseTo(deadline + 1n);
       await escrow.write.refundExpiredJob([1n], { account: client.account });
 
-      assert.equal((await escrow.read.getJob([1n])).status, 3);
+      assert.equal((await escrow.read.getJob([1n])).status, STATUS_REFUNDED);
       assert.equal(await escrow.read.totalLocked(), 0n);
       assert.equal(
         await publicClient.getBalance({ address: escrow.address }),
@@ -434,8 +516,17 @@ describe("ArcMilestone", async function () {
       );
     });
 
+    it("marks Refunded and decreases locked accounting (AwaitingFreelancer job)", async function () {
+      const { client, escrow, deadline } = await createOpenJob();
+      await networkHelpers.time.increaseTo(deadline + 1n);
+      await escrow.write.refundExpiredJob([1n], { account: client.account });
+
+      assert.equal((await escrow.read.getJob([1n])).status, STATUS_REFUNDED);
+      assert.equal(await escrow.read.totalLocked(), 0n);
+    });
+
     it("emits JobRefunded", async function () {
-      const { client, escrow, deadline } = await createFundedJob();
+      const { client, escrow, deadline } = await createAssignedJob();
       await networkHelpers.time.increaseTo(deadline + 1n);
 
       await viem.assertions.emitWithArgs(
@@ -447,7 +538,7 @@ describe("ArcMilestone", async function () {
     });
 
     it("cannot refund the same job twice", async function () {
-      const { client, escrow, deadline } = await createFundedJob();
+      const { client, escrow, deadline } = await createAssignedJob();
       await networkHelpers.time.increaseTo(deadline + 1n);
       await escrow.write.refundExpiredJob([1n], { account: client.account });
 
@@ -455,7 +546,7 @@ describe("ArcMilestone", async function () {
         escrow.write.refundExpiredJob([1n], { account: client.account }),
         escrow,
         "WrongJobStatus",
-        [1n, 3, 0],
+        [1n, STATUS_REFUNDED, STATUS_FUNDED],
       );
     });
 
@@ -467,7 +558,7 @@ describe("ArcMilestone", async function () {
         escrow.write.refundExpiredJob([1n], { account: client.account }),
         escrow,
         "WrongJobStatus",
-        [1n, 1, 0],
+        [1n, STATUS_WORK_SUBMITTED, STATUS_FUNDED],
       );
     });
   });
@@ -509,17 +600,20 @@ describe("ArcMilestone", async function () {
     });
 
     it("creates multiple jobs with sequential unique IDs", async function () {
-      const { client, freelancer, secondFreelancer, escrow, deadline } =
+      const { client, freelancer, escrow, deadline } =
         await networkHelpers.loadFixture(deployArcMilestoneFixture);
 
-      await escrow.write.createAndFundJob(
-        [freelancer.account.address, deadline, METADATA_HASH],
-        { account: client.account, value: PAYMENT },
-      );
-      await escrow.write.createAndFundJob(
-        [secondFreelancer.account.address, deadline, SECOND_METADATA_HASH],
+      await escrow.write.createAndFundJobOpen([deadline, METADATA_HASH], {
+        account: client.account,
+        value: PAYMENT,
+      });
+      await escrow.write.createAndFundJobOpen(
+        [deadline, SECOND_METADATA_HASH],
         { account: client.account, value: SECOND_PAYMENT },
       );
+      await escrow.write.assignFreelancer([1n, freelancer.account.address], {
+        account: client.account,
+      });
 
       assert.equal((await escrow.read.getJob([1n])).id, 1n);
       assert.equal((await escrow.read.getJob([2n])).id, 2n);
@@ -528,32 +622,35 @@ describe("ArcMilestone", async function () {
     });
 
     it("isolates jobs and keeps totalLocked accurate", async function () {
-      const { client, freelancer, secondFreelancer, escrow, deadline } =
+      const { client, freelancer, escrow, deadline } =
         await networkHelpers.loadFixture(deployArcMilestoneFixture);
 
-      await escrow.write.createAndFundJob(
-        [freelancer.account.address, deadline, METADATA_HASH],
-        { account: client.account, value: PAYMENT },
-      );
-      await escrow.write.createAndFundJob(
-        [secondFreelancer.account.address, deadline, SECOND_METADATA_HASH],
+      await escrow.write.createAndFundJobOpen([deadline, METADATA_HASH], {
+        account: client.account,
+        value: PAYMENT,
+      });
+      await escrow.write.createAndFundJobOpen(
+        [deadline, SECOND_METADATA_HASH],
         { account: client.account, value: SECOND_PAYMENT },
       );
+      await escrow.write.assignFreelancer([1n, freelancer.account.address], {
+        account: client.account,
+      });
       await escrow.write.submitWork([1n, DELIVERABLE_HASH], {
         account: freelancer.account,
       });
       await escrow.write.approveAndRelease([1n], { account: client.account });
 
       const untouchedJob = await escrow.read.getJob([2n]);
-      assert.equal(untouchedJob.status, 0);
+      assert.equal(untouchedJob.status, STATUS_AWAITING_FREELANCER);
       assert.equal(untouchedJob.amount, SECOND_PAYMENT);
       assert.equal(await escrow.read.totalLocked(), SECOND_PAYMENT);
 
       await networkHelpers.time.increaseTo(deadline + 1n);
       await escrow.write.refundExpiredJob([2n], { account: client.account });
 
-      assert.equal((await escrow.read.getJob([1n])).status, 2);
-      assert.equal((await escrow.read.getJob([2n])).status, 3);
+      assert.equal((await escrow.read.getJob([1n])).status, STATUS_COMPLETED);
+      assert.equal((await escrow.read.getJob([2n])).status, STATUS_REFUNDED);
       assert.equal(await escrow.read.totalLocked(), 0n);
     });
   });

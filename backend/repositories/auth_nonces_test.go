@@ -2,128 +2,210 @@ package repositories
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
-// TestCreateAuthNonceParamsFields verifies that the nonce creation params
-// contain the fields required to issue a temporary wallet-login challenge.
-func TestCreateAuthNonceParamsFields(t *testing.T) {
-	required := []string{"UserID", "NonceHash", "ExpiresAt"}
-	paramsType := reflect.TypeOf(CreateAuthNonceParams{})
-	names := make(map[string]bool, paramsType.NumField())
-	for i := range paramsType.NumField() {
-		names[paramsType.Field(i).Name] = true
+// TestCreateAuthNonceParamsHasRequiredFields verifies that creating an auth
+// nonce requires the user ID, the hashed nonce, and the expiry time.
+//
+// The wallet address is intentionally not included here because the wallet
+// address belongs to the users table. auth_nonces links back to the user
+// through user_id.
+func TestCreateAuthNonceParamsHasRequiredFields(t *testing.T) {
+	required := []string{
+		"UserID",
+		"NonceHash",
+		"ExpiresAt",
 	}
+
+	paramsType := reflect.TypeOf(CreateAuthNonceParams{})
+
 	for _, name := range required {
-		if !names[name] {
-			t.Errorf("CreateAuthNonceParams is missing required field %q", name)
+		if _, ok := paramsType.FieldByName(name); !ok {
+			t.Errorf(
+				"CreateAuthNonceParams is missing required field %q",
+				name,
+			)
 		}
 	}
 }
 
-// TestCreateAuthNonceParamsHasNoPlaintextNonce verifies that the params struct
-// stores a nonce hash, not the plaintext challenge. The plaintext nonce is sent
-// to the wallet for signing and must never be stored.
+// TestCreateAuthNonceParamsHasNoWalletAddress verifies that wallet address
+// is not duplicated in auth_nonces.
+//
+// The relationship is:
+//
+// users.id -> auth_nonces.user_id
+//
+// The wallet address remains in users.wallet_address.
+func TestCreateAuthNonceParamsHasNoWalletAddress(t *testing.T) {
+	paramsType := reflect.TypeOf(CreateAuthNonceParams{})
+
+	if _, ok := paramsType.FieldByName("WalletAddress"); ok {
+		t.Error(
+			"CreateAuthNonceParams should not contain WalletAddress; " +
+				"wallet identity is stored in users",
+		)
+	}
+}
+
+// TestCreateAuthNonceParamsHasNoPlaintextNonce verifies that the repository
+// accepts only a hash of the authentication challenge.
+//
+// The plaintext nonce is used for the wallet-signature challenge but is not
+// stored in the database.
 func TestCreateAuthNonceParamsHasNoPlaintextNonce(t *testing.T) {
 	paramsType := reflect.TypeOf(CreateAuthNonceParams{})
-	for i := range paramsType.NumField() {
-		name := paramsType.Field(i).Name
-		// "NonceHash" is acceptable; a bare "Nonce" field would indicate
-		// the plaintext is being stored.
-		if name == "Nonce" {
-			t.Error("CreateAuthNonceParams must store NonceHash, not a plaintext Nonce")
-		}
+
+	if _, ok := paramsType.FieldByName("Nonce"); ok {
+		t.Error(
+			"CreateAuthNonceParams must use NonceHash, not plaintext Nonce",
+		)
+	}
+
+	field, ok := paramsType.FieldByName("NonceHash")
+	if !ok {
+		t.Fatal("CreateAuthNonceParams is missing NonceHash")
+	}
+
+	if field.Type.Kind() != reflect.String {
+		t.Errorf(
+			"NonceHash must be a string; got %v",
+			field.Type,
+		)
 	}
 }
 
-// TestNonceExpiryWindowSemantics verifies the business rules for nonce validity
-// that are enforced by the FindValidByNonceHash WHERE clause:
-//   - A nonce is valid when used_at IS NULL AND expires_at > NOW()
-//   - An expired nonce must not be accepted even if unused
-//   - A used nonce must not be accepted even if the expiry is in the future
-func TestNonceExpiryWindowSemantics(t *testing.T) {
+// TestCreateAuthNonceParamsExpiresAtIsTime verifies that the expiry time uses
+// time.Time so the repository can store the exact expiration moment.
+func TestCreateAuthNonceParamsExpiresAtIsTime(t *testing.T) {
+	paramsType := reflect.TypeOf(CreateAuthNonceParams{})
+
+	field, ok := paramsType.FieldByName("ExpiresAt")
+	if !ok {
+		t.Fatal("CreateAuthNonceParams is missing ExpiresAt")
+	}
+
+	if field.Type != reflect.TypeOf(time.Time{}) {
+		t.Errorf(
+			"ExpiresAt must be time.Time; got %v",
+			field.Type,
+		)
+	}
+}
+
+// TestNonceValidityRules verifies the rules used by FindValidByNonceHash:
+//
+// 1. used_at must be NULL.
+// 2. expires_at must be in the future.
+//
+// A nonce that is expired or already used must not be considered valid.
+func TestNonceValidityRules(t *testing.T) {
 	now := time.Now().UTC()
 
-	type nonceState struct {
-		usedAt    *time.Time
-		expiresAt time.Time
+	isValid := func(usedAt *time.Time, expiresAt time.Time) bool {
+		return usedAt == nil && expiresAt.After(now)
 	}
-	isValid := func(n nonceState) bool {
-		return n.usedAt == nil && n.expiresAt.After(now)
-	}
-	used := now.Add(-10 * time.Second)
+
+	usedAt := now.Add(-10 * time.Second)
 
 	tests := []struct {
-		name  string
-		state nonceState
-		want  bool
+		name      string
+		usedAt    *time.Time
+		expiresAt time.Time
+		want      bool
 	}{
 		{
-			name:  "valid — unused, expires in future",
-			state: nonceState{usedAt: nil, expiresAt: now.Add(10 * time.Minute)},
-			want:  true,
+			name:      "unused and not expired",
+			usedAt:    nil,
+			expiresAt: now.Add(10 * time.Minute),
+			want:      true,
 		},
 		{
-			name:  "invalid — expired, not used",
-			state: nonceState{usedAt: nil, expiresAt: now.Add(-1 * time.Second)},
-			want:  false,
+			name:      "unused but expired",
+			usedAt:    nil,
+			expiresAt: now.Add(-1 * time.Second),
+			want:      false,
 		},
 		{
-			name:  "invalid — used, not expired",
-			state: nonceState{usedAt: &used, expiresAt: now.Add(10 * time.Minute)},
-			want:  false,
+			name:      "used but not expired",
+			usedAt:    &usedAt,
+			expiresAt: now.Add(10 * time.Minute),
+			want:      false,
 		},
 		{
-			name:  "invalid — used and expired",
-			state: nonceState{usedAt: &used, expiresAt: now.Add(-1 * time.Second)},
-			want:  false,
+			name:      "used and expired",
+			usedAt:    &usedAt,
+			expiresAt: now.Add(-1 * time.Second),
+			want:      false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if isValid(tc.state) != tc.want {
-				t.Errorf("isValid = %v, want %v", isValid(tc.state), tc.want)
+			got := isValid(tc.usedAt, tc.expiresAt)
+
+			if got != tc.want {
+				t.Errorf(
+					"isValid = %v, want %v",
+					got,
+					tc.want,
+				)
 			}
 		})
 	}
 }
 
-// TestNonceCannotBeReusedAfterMarkUsed verifies the idempotency rule: once a
-// nonce has a non-nil UsedAt, it is no longer valid regardless of expiry time.
-// This mirrors the MarkUsed WHERE clause: UPDATE … WHERE id = ? AND used_at IS NULL.
-func TestNonceCannotBeReusedAfterMarkUsed(t *testing.T) {
-	now := time.Now().UTC()
-	usedAt := now.Add(-5 * time.Second)
-	expiresAt := now.Add(10 * time.Minute)
-
-	// Before marking used — should be valid.
-	beforeUse := struct {
-		usedAt    *time.Time
-		expiresAt time.Time
-	}{usedAt: nil, expiresAt: expiresAt}
-	if beforeUse.usedAt != nil || !beforeUse.expiresAt.After(now) {
-		t.Error("nonce should be valid before use")
+// TestAuthNonceColumnsContainsExpectedColumns verifies that the repository
+// reads the fields that actually exist in the auth_nonces table.
+func TestAuthNonceColumnsContainsExpectedColumns(t *testing.T) {
+	requiredColumns := []string{
+		"id",
+		"user_id",
+		"nonce_hash",
+		"expires_at",
+		"used_at",
+		"created_at",
 	}
 
-	// After marking used — same expiry, but usedAt is set.
-	afterUse := struct {
-		usedAt    *time.Time
-		expiresAt time.Time
-	}{usedAt: &usedAt, expiresAt: expiresAt}
-	if afterUse.usedAt == nil {
-		t.Error("nonce should be invalid after MarkUsed sets used_at")
+	for _, column := range requiredColumns {
+		if !strings.Contains(authNonceColumns, column) {
+			t.Errorf(
+				"authNonceColumns is missing expected column %q",
+				column,
+			)
+		}
 	}
 }
 
-// TestAuthNonceColumnListHasNoPlaintextNonce verifies that the SELECT column
-// list does not expose a raw nonce value. Only the hash is stored and returned.
-func TestAuthNonceColumnListHasNoPlaintextNonce(t *testing.T) {
-	if contains(authNonceColumns, `"nonce"`) || contains(authNonceColumns, ` nonce,`) || contains(authNonceColumns, ` nonce\n`) {
-		t.Error("authNonceColumns must not select a plaintext nonce column; only nonce_hash is stored")
+// TestAuthNonceColumnsHasNoWalletAddress verifies that wallet_address is not
+// duplicated in auth_nonces.
+//
+// The wallet address belongs to users.wallet_address.
+func TestAuthNonceColumnsHasNoWalletAddress(t *testing.T) {
+	if strings.Contains(authNonceColumns, "wallet_address") {
+		t.Error(
+			"authNonceColumns must not include wallet_address; " +
+				"wallet identity belongs to users",
+		)
 	}
-	if !contains(authNonceColumns, "nonce_hash") {
-		t.Error("authNonceColumns must include nonce_hash")
+}
+
+// TestAuthNonceColumnsHasNoPlaintextNonce verifies that the repository does
+// not select a plaintext nonce column.
+func TestAuthNonceColumnsHasNoPlaintextNonce(t *testing.T) {
+	if strings.Contains(authNonceColumns, " nonce,") ||
+		strings.Contains(authNonceColumns, " nonce\n") {
+		t.Error(
+			"authNonceColumns must not contain a plaintext nonce column",
+		)
+	}
+
+	if !strings.Contains(authNonceColumns, "nonce_hash") {
+		t.Error(
+			"authNonceColumns must include nonce_hash",
+		)
 	}
 }

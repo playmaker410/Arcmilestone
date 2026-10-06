@@ -8,10 +8,10 @@ import StatCard from '../components/StatCard'
 import WalletBadge from '../components/WalletBadge'
 import useApp from '../hooks/useApp'
 import { formatDate, formatUSDC } from '../utils/format'
-import { isDirectlyAssignedFreelancer, isJobCreator, isSelectedFreelancer } from '../utils/permissions'
+import { isJobCreator, isSelectedFreelancer } from '../utils/permissions'
 
 export default function Overview() {
-  const { wallet, walletAddress, isWalletConnected, connectWallet, jobs, applications, loadJobs, loadApplications } = useApp()
+  const { user, wallet, walletAddress, isWalletConnected, connectWallet, jobs, applications, loadJobs, loadApplications } = useApp()
 
   useEffect(() => {
     if (isWalletConnected) {
@@ -23,7 +23,7 @@ export default function Overview() {
   const addr = walletAddress || wallet.address
 
   const posted = jobs.filter((job) => isJobCreator(job, addr))
-  const working = jobs.filter((job) => isSelectedFreelancer(job, addr) || isDirectlyAssignedFreelancer(job, addr))
+  const working = jobs.filter((job) => isSelectedFreelancer(job, addr))
   const myApplications = applications
   const received = applications.filter((app) => posted.some((job) => String(job.id) === String(app.job_id || app.jobId)))
 
@@ -47,19 +47,33 @@ export default function Overview() {
   const completed = jobs
     .filter((job) =>
       getMarketplaceStatus(job) === 'completed' &&
-      (isJobCreator(job, addr) || isSelectedFreelancer(job, addr) || isDirectlyAssignedFreelancer(job, addr))
+      (isJobCreator(job, addr) || isSelectedFreelancer(job, addr))
     ).length
 
   const recentJobs = [...posted, ...working.filter((job) => !posted.some((item) => String(item.id) === String(job.id)))].slice(0, 4)
 
-  const displayName = wallet.displayName || 'there'
-  const firstName = displayName.split(' ')[0]
+  /**
+   * Greeting resolution:
+   *   • If the user has set a username, greet them with "@username" — this
+   *     reinforces the handle they chose and matches what others see.
+   *   • Otherwise fall back to the first word of wallet.displayName (the
+   *     shortened address) with a generic "Welcome back, there" safety net.
+   *
+   * We read user.username directly rather than parsing wallet.displayName to
+   * keep the logic explicit and independent of the display-name fallback chain.
+   */
+  const hasUsername = !!user?.username
+  const greetingName = hasUsername
+    ? `@${user.username}`
+    : (wallet.displayName && wallet.displayName !== 'Not connected'
+        ? wallet.displayName.split(' ')[0]
+        : 'there')
 
   return (
     <>
       <PageHeader
         eyebrow="Wallet overview"
-        title={`Welcome back, ${firstName}`}
+        title={`Welcome back, ${greetingName}`}
         description="Your role changes by job. This overview follows your connected wallet."
         actions={<WalletBadge address={addr} label={wallet.network} />}
       />
@@ -98,7 +112,7 @@ export default function Overview() {
                   <div className="min-w-0">
                     <p className="truncate text-sm font-bold text-slate-900">{job.title}</p>
                     <p className="mt-1 text-xs text-slate-500">
-                      {(job.hiring_method || job.hiringMethod) === 'open' ? 'Open for Applications' : 'Direct Hire'} · Due {formatDate(job.delivery_deadline || job.deliveryDeadline)}
+                      Open for Applications · Due {formatDate(job.delivery_deadline || job.deliveryDeadline)}
                     </p>
                   </div>
                   <div className="flex items-center justify-between gap-4">

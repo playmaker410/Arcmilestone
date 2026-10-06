@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import AppProvider from './context/AppContext'
 import DashboardLayout from './layouts/DashboardLayout'
 import useApp from './hooks/useApp'
+import UsernameSetupModal from './components/UsernameSetupModal'
 import CreateJob from './pages/CreateJob'
 import Help from './pages/Help'
 import Home from './pages/Home'
@@ -16,9 +17,31 @@ import ExploreJobs from './pages/ExploreJobs'
 import MyApplications from './pages/MyApplications'
 import ReviewApplications from './pages/ReviewApplications'
 
-// AuthGuard must be inside AppProvider to use useApp
+/**
+ * AuthGuard
+ *
+ * Wraps all protected dashboard routes. It has three responsibilities:
+ *
+ *  1. While the session is being restored from localStorage, show a loading
+ *     spinner so the user never sees a flash to the home page.
+ *
+ *  2. If the user is not authenticated, redirect them to the landing page.
+ *
+ *  3. If the user IS authenticated but has no username yet (needsUsername),
+ *     render the UsernameSetupModal *over* the dashboard content.
+ *     The modal is blocking — it cannot be dismissed — so the user must
+ *     complete profile setup before interacting with the marketplace.
+ *     Once they confirm a username, setUserUsername patches local state and
+ *     needsUsername becomes false, removing the modal automatically.
+ *
+ * Why overlay instead of redirect?
+ *   Keeping the dashboard mounted underneath means the user lands exactly
+ *   where they intended after setup, with no extra navigation step.
+ */
 function AuthGuard({ children }) {
-  const { isWalletConnected, authLoading } = useApp()
+  const { isWalletConnected, authLoading, needsUsername, setUserUsername } = useApp()
+
+  // Phase 1: session restoration in progress — show a neutral loading state
   if (authLoading) {
     return (
       <div className="flex h-screen items-center justify-center text-slate-500">
@@ -26,8 +49,37 @@ function AuthGuard({ children }) {
       </div>
     )
   }
+
+  // Phase 2: not authenticated — send to the landing page
   if (!isWalletConnected) return <Navigate to="/" replace />
-  return children
+
+  // Phase 3: authenticated — render the dashboard, plus the username modal
+  //          when the user hasn't chosen a username yet.
+  return (
+    <>
+      {children}
+
+      {/*
+       * UsernameSetupModal sits in a React portal-like position (fixed
+       * full-screen via Tailwind's `fixed inset-0 z-50`) so it covers the
+       * entire dashboard regardless of scroll position or nested layout.
+       *
+       * It is only rendered when needsUsername is true, so returning users
+       * (whose user.username is already set) never see it again.
+       */}
+      {needsUsername && (
+        <UsernameSetupModal
+          /**
+           * onComplete is called with the confirmed username string after
+           * the backend PATCH /api/users/me succeeds inside the modal.
+           * setUserUsername patches the local user object so needsUsername
+           * flips to false and the modal unmounts.
+           */
+          onComplete={setUserUsername}
+        />
+      )}
+    </>
+  )
 }
 
 function AppRoutes() {

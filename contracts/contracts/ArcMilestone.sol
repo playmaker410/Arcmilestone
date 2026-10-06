@@ -45,6 +45,8 @@ contract ArcMilestone {
   error PaymentTransferFailed(uint256 jobId, address recipient, uint256 amount);
   error ReentrantCall();
   error DirectPaymentNotAllowed();
+  error FreelancerAlreadyAssigned(uint256 jobId);
+  error JobNotAwaitingFreelancer(uint256 jobId, JobStatus currentStatus);
 
   // =====================================================
   // SECTION 2: JOB STATUS
@@ -55,11 +57,14 @@ contract ArcMilestone {
   // and Refunded instead of unexplained numbers.
   //
   // Only these paths are valid:
+  //   AwaitingFreelancer -> Funded (via assignFreelancer)
   //   Funded -> WorkSubmitted -> Completed
   //   Funded -> Refunded
+  //   AwaitingFreelancer -> Refunded (deadline passes, nobody ever assigned)
   // Restricting transitions is what prevents a second payout or refund.
 
   enum JobStatus {
+    AwaitingFreelancer,
     Funded,
     WorkSubmitted,
     Completed,
@@ -115,13 +120,18 @@ contract ArcMilestone {
   // indexed fields become searchable log topics. An event may have at most three
   // indexed application fields, so identities are indexed and data remains visible.
 
-  event JobCreatedAndFunded(
+  event JobCreatedAndFundedOpen(
     uint256 indexed jobId,
     address indexed client,
-    address indexed freelancer,
     uint256 amount,
     uint256 deadline,
     bytes32 metadataHash
+  );
+
+  event FreelancerAssigned(
+    uint256 indexed jobId,
+    address indexed client,
+    address indexed freelancer
   );
 
   event WorkSubmitted(
@@ -188,96 +198,47 @@ contract ArcMilestone {
   }
 
   // =====================================================
-  // SECTION 7: CREATE AND FUND A JOB
+  // SECTION 7: CREATE AN OPEN FUNDED JOB (NO FREELANCER YET)
   // =====================================================
 
-  /// @notice Creates a job and locks its complete payment in one transaction.
-  /// @param freelancer The marketplace-selected wallet that may submit work.
+  /// @notice Creates a job and locks its complete payment without assigning a
+  ///         freelancer. The client reviews applications off-chain and then
+  ///         calls assignFreelancer once a winner is chosen.
   /// @param deadline The final Unix timestamp at which work may be submitted.
   /// @param metadataHash A hash of the offchain job metadata.
   /// @return jobId The new sequential job identifier.
-  function createAndFundJob(
-    address freelancer,
+  function createAndFundJobOpen(
     uint256 deadline,
     bytes32 metadataHash
   ) external payable returns (uint256 jobId) {
-    // =====================================================
-    // STEP 1: VALIDATE THE PARTICIPANTS
-    // =====================================================
-    // The zero address has no usable private key, so assigning it would make valid
-    // submission impossible. Separating client and freelancer also preserves the
-    // intended two-party approval flow.
-
-    if (freelancer == address(0)) {
-      revert ZeroFreelancerAddress();
-    }
-    if (freelancer == msg.sender) {
-      revert ClientCannotBeFreelancer(msg.sender);
-    }
-
-    // =====================================================
-    // STEP 2: VALIDATE THE PAYMENT AND DEADLINE
-    // =====================================================
-    // payable lets this function receive Arc's native USDC. msg.value is the exact
-    // native amount supplied with the call. Solidity uses integers, not floating
-    // point numbers, so this amount is expressed in Arc's smallest native accounting
-    // unit (18 decimal places). Zero would create an escrow with nothing to release.
-    //
-    // block.timestamp is the current block's Unix time. Requiring a later deadline
-    // ensures the freelancer receives a real opportunity to submit after creation.
-
     if (msg.value == 0) {
       revert ZeroPayment();
     }
     if (deadline <= block.timestamp) {
       revert InvalidDeadline(deadline, block.timestamp);
     }
-
-    // =====================================================
-    // STEP 3: REQUIRE A METADATA REFERENCE
-    // =====================================================
-    // bytes32(0) is the empty hash sentinel. Rejecting it ensures every escrow has
-    // a reference that the marketplace can connect to its offchain job record.
-
     if (metadataHash == bytes32(0)) {
       revert EmptyMetadataHash();
     }
 
-    // =====================================================
-    // STEP 4: CREATE A UNIQUE FUNDED JOB
-    // =====================================================
-    // Every agreement needs a unique ID or a later job could overwrite an earlier
-    // one in the mapping. Incrementing first reserves ID zero as "not found."
-    //
-    // The job begins as Funded because creation and payment happen atomically: if
-    // any check or storage operation reverts, the entire transaction—including the
-    // native USDC transfer—reverts, so an unfunded onchain job is never created.
-
     jobId = ++_jobCount;
+    // freelancer is address(0) until assignFreelancer is called.
     _jobs[jobId] = Job({
       id: jobId,
       client: msg.sender,
-      freelancer: freelancer,
+      freelancer: address(0),
       amount: msg.value,
       deadline: deadline,
       metadataHash: metadataHash,
       deliverableHash: bytes32(0),
-      status: JobStatus.Funded
+      status: JobStatus.AwaitingFreelancer
     });
-
-    // =====================================================
-    // STEP 5: UPDATE ACCOUNTING AND ANNOUNCE THE JOB
-    // =====================================================
-    // totalLocked tracks obligations, not merely address(this).balance. A forced or
-    // otherwise unexpected balance must never be mistaken for a user's escrow.
 
     totalLocked += msg.value;
 
-    // emit writes an event log. It does not call another contract or move funds.
-    emit JobCreatedAndFunded(
+    emit JobCreatedAndFundedOpen(
       jobId,
       msg.sender,
-      freelancer,
       msg.value,
       deadline,
       metadataHash
@@ -285,7 +246,42 @@ contract ArcMilestone {
   }
 
   // =====================================================
-  // SECTION 8: SUBMIT WORK
+  // SECTION 8: ASSIGN FREELANCER TO AN OPEN JOB
+  // =====================================================
+
+  /// @notice Assigns the selected freelancer to an AwaitingFreelancer job and
+  ///         moves it to Funded so work can begin.
+  /// @param jobId  The job that needs a freelancer.
+  /// @param freelancer The wallet selected from off-chain applications.
+  function assignFreelancer(
+    uint256 jobId,
+    address freelancer
+  ) external jobExists(jobId) onlyJobClient(jobId) {
+    if (freelancer == address(0)) {
+      revert ZeroFreelancerAddress();
+    }
+    if (freelancer == msg.sender) {
+      revert ClientCannotBeFreelancer(msg.sender);
+    }
+
+    Job storage job = _jobs[jobId];
+
+    if (job.status != JobStatus.AwaitingFreelancer) {
+      revert JobNotAwaitingFreelancer(jobId, job.status);
+    }
+    // Extra guard: should never be non-zero here, but be explicit.
+    if (job.freelancer != address(0)) {
+      revert FreelancerAlreadyAssigned(jobId);
+    }
+
+    job.freelancer = freelancer;
+    job.status = JobStatus.Funded;
+
+    emit FreelancerAssigned(jobId, msg.sender, freelancer);
+  }
+
+  // =====================================================
+  // SECTION 9: SUBMIT WORK
   // =====================================================
 
   /// @notice Records the assigned freelancer's offchain deliverable hash.
@@ -333,7 +329,7 @@ contract ArcMilestone {
   }
 
   // =====================================================
-  // SECTION 9: APPROVE AND RELEASE PAYMENT
+  // SECTION 10: APPROVE AND RELEASE PAYMENT
   // =====================================================
 
   /// @notice Lets the client approve submitted work and pay the freelancer.
@@ -384,29 +380,25 @@ contract ArcMilestone {
   }
 
   // =====================================================
-  // SECTION 10: REFUND AN EXPIRED JOB
+  // SECTION 11: REFUND AN EXPIRED JOB
   // =====================================================
 
   /// @notice Returns funds when no work was submitted before the deadline.
+  ///         Also handles AwaitingFreelancer jobs where no freelancer was ever
+  ///         assigned before the deadline passed.
   function refundExpiredJob(
     uint256 jobId
   ) external jobExists(jobId) onlyJobClient(jobId) nonReentrant {
-    // =====================================================
-    // STEP 1: REQUIRE AN UNSUBMITTED FUNDED JOB
-    // =====================================================
-    // Version one has no dispute arbitrator. Once work is submitted, the client may
-    // not unilaterally refund; only the approval path may resolve that escrow.
-
     Job storage job = _jobs[jobId];
 
-    if (job.status != JobStatus.Funded) {
+    // Allow refund from either Funded (freelancer assigned, no work submitted)
+    // or AwaitingFreelancer (deadline passed, nobody was ever assigned).
+    if (
+      job.status != JobStatus.Funded &&
+      job.status != JobStatus.AwaitingFreelancer
+    ) {
       revert WrongJobStatus(jobId, job.status, JobStatus.Funded);
     }
-
-    // =====================================================
-    // STEP 2: REQUIRE THE DEADLINE TO HAVE PASSED
-    // =====================================================
-    // Submission is allowed on the deadline, so refund begins strictly afterward.
 
     if (block.timestamp <= job.deadline) {
       revert RefundNotYetAvailable(jobId, job.deadline, block.timestamp);
@@ -414,12 +406,6 @@ contract ArcMilestone {
 
     uint256 amount = job.amount;
     address client = job.client;
-
-    // =====================================================
-    // STEP 3: FINALIZE STATE, THEN RETURN THE FUNDS
-    // =====================================================
-    // Refunded status makes this a one-time action. As in approval, effects happen
-    // before interaction and a failed call reverts both the status and accounting.
 
     job.status = JobStatus.Refunded;
     totalLocked -= amount;
@@ -433,7 +419,7 @@ contract ArcMilestone {
   }
 
   // =====================================================
-  // SECTION 11: READ-ONLY FUNCTIONS
+  // SECTION 12: READ-ONLY FUNCTIONS
   // =====================================================
   //
   // view means these calls read state without changing it. A frontend can normally
@@ -452,11 +438,11 @@ contract ArcMilestone {
   }
 
   // =====================================================
-  // SECTION 12: REJECT UNTRACKED PAYMENTS
+  // SECTION 13: REJECT UNTRACKED PAYMENTS
   // =====================================================
   //
-  // Native USDC must enter through createAndFundJob so every accepted amount has a
-  // client, freelancer, deadline, and lifecycle. Plain sends and unknown function
+  // Native USDC must enter through createAndFundJobOpen so every accepted amount has
+  // a client, deadline, and lifecycle (the freelancer is bound later by assignFreelancer). Plain sends and unknown function
   // calls revert instead of trapping funds outside totalLocked. These functions do
   // not claim protection against protocol-level forced balance changes; accounting
   // remains based only on recorded escrows.

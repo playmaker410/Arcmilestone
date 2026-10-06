@@ -9,8 +9,8 @@ import { api } from '../services/api'
 import { formatDate, formatUSDC } from '../utils/format'
 
 // Backend statuses are lowercase
-const statuses = ['All', 'pending', 'accepted', 'rejected', 'withdrawn']
-const statusLabels = { All: 'All', pending: 'Pending', accepted: 'Accepted', rejected: 'Rejected', withdrawn: 'Withdrawn' }
+const statuses = ['All', 'pending', 'accepted', 'withdrawn']
+const statusLabels = { All: 'All', pending: 'Pending', accepted: 'Accepted', withdrawn: 'Withdrawn' }
 
 export default function MyApplications() {
   const { applications, applicationsLoading, loadApplications } = useApp()

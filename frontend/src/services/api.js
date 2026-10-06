@@ -40,6 +40,37 @@ export const api = {
   getMyProfile: () => request('/api/users/me'),
   updateMyProfile: (body) => request('/api/users/me', { method: 'PATCH', body: JSON.stringify(body) }),
 
+  /**
+   * Check whether a username is available before the user commits to it.
+   * Sends a GET request with the candidate username as a query parameter.
+   *
+   * BACKEND REQUIRED:
+   *   GET /api/users/check-username?username=<value>
+   *   Response 200 → { available: true }
+   *   Response 200 → { available: false }
+   *   Response 400 → { error: "..." }  (invalid format)
+   *
+   * Until the backend endpoint exists this will throw — the modal catches
+   * the error and shows an inline message so the UI stays functional.
+   */
+  checkUsername: (username) =>
+    request(`/api/users/check-username?username=${encodeURIComponent(username)}`),
+
+  /**
+   * Persist the chosen username for the authenticated user.
+   * Re-uses the existing PATCH /api/users/me endpoint.
+   *
+   * BACKEND REQUIRED:
+   *   PATCH /api/users/me
+   *   Body: { "username": "<value>" }
+   *   The backend must enforce UNIQUE on the users.username column so that
+   *   two simultaneous requests for the same name produce a clear 409 / error.
+   *   The frontend availability check is a UX aid only — the DB is the
+   *   final authority.
+   */
+  setUsername: (username) =>
+    request('/api/users/me', { method: 'PATCH', body: JSON.stringify({ username }) }),
+
   // Jobs
   createJob: (body) => request('/api/jobs', { method: 'POST', body: JSON.stringify(body) }),
   listJobs: (mine = false) => request(mine ? '/api/jobs?mine=true' : '/api/jobs'),
@@ -47,6 +78,7 @@ export const api = {
   updateJob: (id, body) => request(`/api/jobs/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   publishJob: (id) => request(`/api/jobs/${id}/publish`, { method: 'POST' }),
   cancelJob: (id) => request(`/api/jobs/${id}/cancel`, { method: 'POST' }),
+  deleteJob: (id) => request(`/api/jobs/${id}`, { method: 'DELETE' }),
 
   // Applications
   applyToJob: (jobId, body) => request(`/api/jobs/${jobId}/applications`, { method: 'POST', body: JSON.stringify(body) }),
@@ -59,6 +91,8 @@ export const api = {
   // Submissions
   createSubmission: (jobId, body) => request(`/api/jobs/${jobId}/submission`, { method: 'POST', body: JSON.stringify(body) }),
   getSubmission: (jobId) => request(`/api/jobs/${jobId}/submission`),
+
+  getEscrow: (jobId) => request(`/api/jobs/${jobId}/escrow`),
 
   // Notifications
   getNotifications: () => request('/api/notifications'),

@@ -7,21 +7,34 @@ const arcTestnet = {
   id: CHAIN_ID,
   name: 'Arc Testnet',
   nativeCurrency: { name: 'Arc USD', symbol: 'USDC', decimals: 18 },
-  rpcUrls: { default: { http: ['https://rpc.testnet.arc.io'] } },
+  rpcUrls: { default: { http: [import.meta.env.VITE_ARC_RPC_URL || 'https://rpc.testnet.arc.io'] } },
 }
 
 // ABI — only the functions the frontend needs
 const ARC_MILESTONE_ABI = [
+
   {
-    name: 'createAndFundJob',
+    // Open-hire variant: locks funds without a freelancer address.
+    // Call assignFreelancer after selecting from applications.
+    name: 'createAndFundJobOpen',
     type: 'function',
     stateMutability: 'payable',
     inputs: [
-      { name: 'freelancer', type: 'address' },
       { name: 'deadline', type: 'uint256' },
       { name: 'metadataHash', type: 'bytes32' },
     ],
     outputs: [{ name: 'jobId', type: 'uint256' }],
+  },
+  {
+    // Assign the selected freelancer to an AwaitingFreelancer job.
+    name: 'assignFreelancer',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'jobId', type: 'uint256' },
+      { name: 'freelancer', type: 'address' },
+    ],
+    outputs: [],
   },
   {
     name: 'submitWork',
@@ -87,10 +100,22 @@ export async function getAccounts() {
 }
 
 // Sign a personal message (EIP-191) for authentication
+// Sign a personal message (EIP-191) for authentication
 export async function signMessage(address, message) {
-  const walletClient = getWalletClient()
-  const signature = await walletClient.signMessage({ account: address, message })
+  if (!window.ethereum) throw new Error('No wallet extension found. Please install MetaMask or a compatible wallet.')
+  
+  // Create a chain-agnostic client (no 'chain' parameter) specifically for signing.
+  // This prevents viem from throwing a ChainMismatchError if the user is on Mainnet.
+  const authClient = createWalletClient({ transport: custom(window.ethereum) })
+  
+  const signature = await authClient.signMessage({ account: address, message })
   return signature
+}
+
+// Get the native Arc balance of an address in wei (bigint)
+export async function getWalletBalance(address) {
+  const publicClient = getPublicClient()
+  return publicClient.getBalance({ address })
 }
 
 // Convert a budget string (decimal USDC, e.g. "125.5") to wei bigint
@@ -104,10 +129,10 @@ export function weiToDisplay(wei) {
   return formatUnits(wei, 18)
 }
 
-// createAndFundJob: funds the escrow on-chain
-// budgetString: exact decimal string from backend (e.g. "125.000000000000000000")
-// Returns: { transactionHash: string, blockchainJobId: string }
-export async function fundEscrow({ freelancerAddress, deliveryDeadlineISO, metadataHashInput, budgetString, clientAddress }) {
+// createAndFundJobOpen: locks funds at job creation without a freelancer.
+// Used in the new open-hire flow. assignFreelancer is called later.
+// Returns: { transactionHash, blockchainJobId }
+export async function createAndFundJobOpen({ deliveryDeadlineISO, metadataHashInput, budgetString, clientAddress }) {
   if (!CONTRACT_ADDRESS) throw new Error('Contract address not configured. Set VITE_CONTRACT_ADDRESS.')
 
   const walletClient = getWalletClient()
@@ -120,34 +145,52 @@ export async function fundEscrow({ freelancerAddress, deliveryDeadlineISO, metad
   const hash = await walletClient.writeContract({
     address: CONTRACT_ADDRESS,
     abi: ARC_MILESTONE_ABI,
-    functionName: 'createAndFundJob',
-    args: [freelancerAddress, deadlineUnix, metadataHash],
+    functionName: 'createAndFundJobOpen',
+    args: [deadlineUnix, metadataHash],
     value,
     account: clientAddress,
   })
 
-  // Wait for confirmation
   const receipt = await publicClient.waitForTransactionReceipt({ hash })
 
-  // Extract jobId from logs — JobCreatedAndFunded event topic[1] is jobId
-  // The event: JobCreatedAndFunded(uint256 indexed jobId, ...)
-  // jobId is the first indexed param, so topics[1]
+  // Extract jobId from logs — JobCreatedAndFundedOpen event signature hash
+  const eventSignature = keccak256(toBytes('JobCreatedAndFundedOpen(uint256,address,uint256,uint256,bytes32)'))
   let blockchainJobId = null
   for (const log of receipt.logs) {
     if (log.address.toLowerCase() === CONTRACT_ADDRESS.toLowerCase()) {
-      if (log.topics[1]) {
+      if (log.topics[0] === eventSignature && log.topics[1]) {
         blockchainJobId = BigInt(log.topics[1]).toString()
       }
       break
     }
   }
 
-  return {
-    transactionHash: hash,
-    blockchainJobId,
-    receipt,
-  }
+  return { transactionHash: hash, blockchainJobId, receipt }
 }
+
+export const fundOpenJobOnChain = createAndFundJobOpen
+
+
+// assignFreelancer: called after the client selects an applicant off-chain.
+// Moves the on-chain job from AwaitingFreelancer → Funded.
+export async function assignFreelancerOnChain({ blockchainJobId, freelancerAddress, clientAddress }) {
+  if (!CONTRACT_ADDRESS) throw new Error('Contract address not configured.')
+
+  const walletClient = getWalletClient()
+  const publicClient = getPublicClient()
+
+  const hash = await walletClient.writeContract({
+    address: CONTRACT_ADDRESS,
+    abi: ARC_MILESTONE_ABI,
+    functionName: 'assignFreelancer',
+    args: [BigInt(blockchainJobId), freelancerAddress],
+    account: clientAddress,
+  })
+
+  const receipt = await publicClient.waitForTransactionReceipt({ hash })
+  return { transactionHash: hash, receipt }
+}
+
 
 // submitWork: records deliverable hash on-chain
 // submissionUrl is used to derive the deliverableHash bytes32
@@ -212,6 +255,19 @@ export async function refundExpiredJobOnChain({ blockchainJobId, clientAddress }
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash })
   return { transactionHash: hash, receipt }
+}
+
+// Check if an address has enough native balance to cover a given USDC amount.
+// Throws if the RPC call fails — callers should treat that as "cannot verify"
+// and NOT proceed to create anything, rather than silently skipping the check.
+export async function checkSufficientBalance(address, budgetString) {
+  const required = budgetToWei(budgetString)
+  const balance = await getWalletBalance(address)
+  return {
+    sufficient: balance >= required,
+    balance,
+    required,
+  }
 }
 
 export { keccak256, toBytes, parseUnits, formatUnits }

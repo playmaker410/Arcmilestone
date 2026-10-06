@@ -4,9 +4,8 @@ export const sameAddress = (first, second) =>
 // Support both backend snake_case and legacy camelCase field names
 const getCreatorWallet = (job) => job?.creator_wallet || job?.creatorWallet
 const getSelectedFreelancerWallet = (job) => job?.selected_freelancer_wallet || job?.selectedFreelancerWallet
-const getHiringMethod = (job) => job?.hiring_method || job?.hiringMethod
 const getMarketplaceStatus = (job) => {
-  const s = job?.marketplace_status || job?.marketplaceStatus || ''
+  const s = job?.marketplace_status || job?.marketplaceStatus || job?.status || ''
   return s.toLowerCase()
 }
 const getEscrowStatus = (job) => {
@@ -23,8 +22,6 @@ export const isJobCreator = (job, walletAddress) =>
 export const isSelectedFreelancer = (job, walletAddress) =>
   sameAddress(getSelectedFreelancerWallet(job), walletAddress)
 
-export const isDirectlyAssignedFreelancer = (job, walletAddress) =>
-  getHiringMethod(job) === 'direct' && sameAddress(getSelectedFreelancerWallet(job), walletAddress)
 
 export const hasApplied = (job, walletAddress, applications = []) =>
   applications.some((app) => {
@@ -46,23 +43,28 @@ export const hasApplicationDeadlinePassed = (job) => {
   return new Date(deadline) < new Date()
 }
 
+// All jobs use open hiring — anyone can apply until the application deadline passes.
 export const canApply = (job, walletAddress, applications = []) =>
-  getHiringMethod(job) === 'open' &&
   getMarketplaceStatus(job) === 'open' &&
   !hasApplicationDeadlinePassed(job) &&
   !isJobCreator(job, walletAddress) &&
   !hasApplied(job, walletAddress, applications)
 
+// The creator can always review applications on their own jobs.
 export const canReviewApplications = (job, walletAddress) =>
-  getHiringMethod(job) === 'open' && isJobCreator(job, walletAddress)
+  isJobCreator(job, walletAddress)
 
-export const canFundEscrow = (job, walletAddress) =>
+export const canFundJob = (job, walletAddress) =>
   isJobCreator(job, walletAddress) &&
-  getMarketplaceStatus(job) === 'awaiting_funding' &&
+  getEscrowStatus(job) === null
+
+export const canAssignOnChain = (job, walletAddress) =>
+  isJobCreator(job, walletAddress) &&
+  getEscrowStatus(job) === 'awaiting_freelancer' &&
   Boolean(getSelectedFreelancerWallet(job))
 
 export const canSubmitWork = (job, walletAddress) =>
-  (isSelectedFreelancer(job, walletAddress) || isDirectlyAssignedFreelancer(job, walletAddress)) &&
+  isSelectedFreelancer(job, walletAddress) &&
   getEscrowStatus(job) === 'funded'
 
 export const canApproveWork = (job, walletAddress) =>

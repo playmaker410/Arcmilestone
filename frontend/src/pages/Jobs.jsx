@@ -5,16 +5,16 @@ import EmptyState from '../components/EmptyState'
 import JobCard from '../components/JobCard'
 import PageHeader from '../components/PageHeader'
 import useApp from '../hooks/useApp'
-import { isDirectlyAssignedFreelancer, isJobCreator, isSelectedFreelancer } from '../utils/permissions'
+import { isJobCreator, isSelectedFreelancer } from '../utils/permissions'
 
-const postedStatuses = ['All', 'draft', 'open', 'reviewing_applications', 'awaiting_funding', 'in_progress', 'completed', 'cancelled']
+const postedStatuses = ['All', 'work_submitted', 'refunded', 'completed', 'cancelled']
 const postedStatusLabels = {
-  All: 'All', draft: 'Draft', open: 'Open', reviewing_applications: 'Reviewing Applications',
-  awaiting_funding: 'Awaiting Funding', in_progress: 'In Progress', completed: 'Completed', cancelled: 'Cancelled',
+  All: 'All', work_submitted: 'Work Submitted',
+  refunded: 'Refunded', completed: 'Completed', cancelled: 'Cancelled',
 }
-const workingStatuses = ['All', 'funded', 'work_submitted', 'completed', 'refunded']
+const workingStatuses = ['All', 'work_submitted', 'completed', 'refunded']
 const workingStatusLabels = {
-  All: 'All', funded: 'Funded', work_submitted: 'Work Submitted', completed: 'Completed', refunded: 'Refunded',
+  All: 'All', work_submitted: 'Work Submitted', completed: 'Completed', refunded: 'Refunded',
 }
 
 const actionForJob = (job, tab) => {
@@ -24,13 +24,12 @@ const actionForJob = (job, tab) => {
     return ({
       open: 'View Applications',
       reviewing_applications: 'Review Applications',
-      awaiting_funding: 'Create and Fund Escrow',
       in_progress: es === 'work_submitted' ? 'Review Submission' : 'View Progress',
       completed: 'View Payment', cancelled: 'View Details', draft: 'View Details',
     })[ms] || 'View Details'
   }
   return ({
-    awaiting_funding: 'Wait for Client Funding', funded: 'Submit Work',
+    awaiting_freelancer: 'Wait for Client Assignment', funded: 'Submit Work',
     work_submitted: 'Await Client Approval', completed: 'View Payment', refunded: 'View Details',
   })[es || ms] || 'View Details'
 }
@@ -69,13 +68,13 @@ export default function Jobs() {
     return jobs.filter((job) => {
       const es = (job.escrow_status || job.escrowStatus || '').toLowerCase()
       const ms = (job.marketplace_status || job.marketplaceStatus || '').toLowerCase()
-      const isWorking = isSelectedFreelancer(job, addr) || isDirectlyAssignedFreelancer(job, addr)
+      const isWorking = isSelectedFreelancer(job, addr)
       const visibleStatus = es || ms
       return isWorking &&
         (status === 'All' || visibleStatus === status) &&
         `${job.title} ${job.id}`.toLowerCase().includes(query.toLowerCase())
     })
-  }, [jobs, applications, query, status, tab, addr])
+  }, [jobs, query, status, tab, addr])
 
   // For working tab, also derive working jobs from accepted applications
   const workingFromApplications = useMemo(() => {

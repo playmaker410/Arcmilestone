@@ -1,4 +1,4 @@
-import { ArrowUpRight, BriefcaseBusiness, CalendarDays, Search, Users } from 'lucide-react'
+import { ArrowUpRight, BriefcaseBusiness, CalendarDays, Search } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import EmptyState from '../components/EmptyState'
@@ -32,9 +32,8 @@ export default function ExploreJobs() {
 
   // Backend returns only open jobs from GET /api/jobs — filter defensively
   const openJobs = useMemo(() => jobs.filter((job) => {
-    const hiringMethod = job.hiring_method || job.hiringMethod
-    const marketplaceStatus = (job.marketplace_status || job.marketplaceStatus || '').toLowerCase()
-    if (hiringMethod !== 'open' || marketplaceStatus !== 'open' || hasApplicationDeadlinePassed(job)) return false
+    const marketplaceStatus = (job.marketplace_status || job.marketplaceStatus || job.status || '').toLowerCase()
+    if (marketplaceStatus !== 'open' || hasApplicationDeadlinePassed(job)) return false
     const skills = getSkills(job)
     const amount = Number(job.budget)
     const matchesQuery = `${job.title} ${skills.join(' ')}`.toLowerCase().includes(query.toLowerCase())
@@ -48,7 +47,7 @@ export default function ExploreJobs() {
   }), [jobs, query, range, skill])
 
   const allSkills = useMemo(() =>
-    [...new Set(jobs.filter((j) => (j.hiring_method || j.hiringMethod) === 'open').flatMap(getSkills))].sort(),
+    [...new Set(jobs.flatMap(getSkills))].sort(),
     [jobs]
   )
 

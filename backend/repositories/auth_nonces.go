@@ -39,7 +39,7 @@ func NewAuthNonceRepository(db *sql.DB) *AuthNonceRepository {
 // Create inserts a new auth nonce row and returns the database-generated ID.
 func (r *AuthNonceRepository) Create(ctx context.Context, params CreateAuthNonceParams) (uint64, error) {
 	result, err := r.db.ExecContext(ctx, `
-		INSERT INTO auth_nonces (user_id, nonce_hash, expires_at)
+		INSERT INTO auth_nonces (user_id,nonce_hash, expires_at)
 		VALUES (?, ?, ?)`,
 		params.UserID,
 		params.NonceHash,

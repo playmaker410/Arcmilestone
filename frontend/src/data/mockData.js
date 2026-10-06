@@ -50,7 +50,7 @@ export const jobs = [
   },
   {
     id: 'job-003', blockchainJobId: 'ARC-1048', creatorWallet: demoWallets[0].address,
-    hiringMethod: 'direct', title: 'Build a SaaS landing page',
+    hiringMethod: 'open', title: 'Build a SaaS landing page',
     description: 'Design and build a responsive marketing page for a B2B analytics platform with accessible interactions and a clean component structure.',
     requiredSkills: ['React', 'Tailwind CSS'], budget: '150', applicationDeadline: null,
     deliveryDeadline: '2026-09-24', referenceUrl: 'https://example.com/saas-brief',
@@ -63,7 +63,7 @@ export const jobs = [
   },
   {
     id: 'job-004', blockchainJobId: 'ARC-1044', creatorWallet: demoWallets[2].address,
-    hiringMethod: 'direct', title: 'Design a company logo',
+    hiringMethod: 'open', title: 'Design a company logo',
     description: 'Create a refined logo system for a sustainable logistics company, including primary, monochrome, and icon-only variations.',
     requiredSkills: ['Brand Design', 'Illustrator'], budget: '75', applicationDeadline: null,
     deliveryDeadline: '2026-10-01', referenceUrl: 'https://example.com/brand-brief',
@@ -74,7 +74,7 @@ export const jobs = [
   },
   {
     id: 'job-005', blockchainJobId: 'ARC-1037', creatorWallet: demoWallets[0].address,
-    hiringMethod: 'direct', title: 'Develop a Go API endpoint',
+    hiringMethod: 'open', title: 'Develop a Go API endpoint',
     description: 'Implement an authenticated reporting endpoint with pagination, validation, and unit tests in an existing Go service.',
     requiredSkills: ['Go', 'REST API', 'Testing'], budget: '200', applicationDeadline: null,
     deliveryDeadline: '2026-09-18', referenceUrl: 'https://example.com/api-spec',

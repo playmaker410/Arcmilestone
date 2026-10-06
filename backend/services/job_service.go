@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 )
 
 // JobService handles marketplace job business logic.
-// Escrow/payment state remains authoritative on the Arc contract.
+// Escrow and payment state remain authoritative on the Arc blockchain and are
+// managed through the separate job_escrows table and blockchain event indexer.
 type JobService struct {
 	jobs  *repositories.JobRepository
 	users *repositories.UserRepository
@@ -31,27 +33,26 @@ func NewJobService(
 	return &JobService{jobs: jobs, users: users, notif: notif}
 }
 
-// CreateJobParams holds the request fields for a new job.
+// CreateJobParams holds the fields submitted by the authenticated user when
+// creating a new job. Fields that are determined server-side (creator_user_id,
+// selected_freelancer_id, status, id, created_at, updated_at) are never
+// accepted from the caller.
 type CreateJobParams struct {
-	HiringMethod        string
 	Title               string
 	Description         string
-	RequiredSkills      []string
-	Budget              string
+	RequiredSkills      []string  // will be marshalled to JSON for storage
+	Budget              string    // exact decimal string, e.g. "150.00"
 	ApplicationDeadline *time.Time
 	DeliveryDeadline    time.Time
-	ReferenceURL        *string
-	// For direct-hire: the intended freelancer wallet.
-	FreelancerWallet *string
 }
 
+// Create validates the input, sets the initial job status to OPEN, and
+// inserts the job into the database. selected_freelancer_id is always NULL
+// on creation. Returns the newly created job.
 func (s *JobService) Create(ctx context.Context, creatorUserID uint64, params CreateJobParams) (*models.Job, error) {
 	if err := validateCreateJob(params); err != nil {
 		return nil, err
 	}
-
-	method := models.HiringMethod(params.HiringMethod)
-	status := models.MarketplaceStatusDraft
 
 	skills, err := json.Marshal(params.RequiredSkills)
 	if err != nil {
@@ -60,52 +61,22 @@ func (s *JobService) Create(ctx context.Context, creatorUserID uint64, params Cr
 
 	jobID, err := s.jobs.Create(ctx, repositories.CreateJobParams{
 		CreatorUserID:       creatorUserID,
-		HiringMethod:        method,
 		Title:               strings.TrimSpace(params.Title),
 		Description:         strings.TrimSpace(params.Description),
 		RequiredSkills:      skills,
 		Budget:              params.Budget,
 		ApplicationDeadline: params.ApplicationDeadline,
 		DeliveryDeadline:    params.DeliveryDeadline,
-		ReferenceURL:        params.ReferenceURL,
-		MarketplaceStatus:   status,
+		Status:              models.JobStatusOpen,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create job: %w", err)
 	}
 
-	// For direct-hire, record the freelancer wallet immediately if provided.
-	if method == models.HiringMethodDirect && params.FreelancerWallet != nil {
-		wallet := strings.ToLower(strings.TrimSpace(*params.FreelancerWallet))
-		if !isValidEVMAddress(wallet) {
-			return nil, apperr.NewValidation(map[string]string{"freelancer_wallet": "must be a valid EVM address"})
-		}
-		freelancer, ferr := s.users.FindByWalletAddress(ctx, wallet)
-		if errors.Is(ferr, sql.ErrNoRows) {
-			return nil, apperr.ErrNotFound
-		}
-		if ferr != nil {
-			return nil, ferr
-		}
-		if ferr = s.jobs.SelectFreelancer(ctx, jobID, freelancer.ID, wallet); ferr != nil {
-			return nil, ferr
-		}
-	}
-
 	return s.jobs.FindByID(ctx, jobID)
 }
 
-// ListOpen returns all jobs currently accepting applications.
-func (s *JobService) ListOpen(ctx context.Context) ([]*models.Job, error) {
-	return s.jobs.ListOpen(ctx)
-}
-
-// ListByCreator returns jobs posted by the given user.
-func (s *JobService) ListByCreator(ctx context.Context, userID uint64) ([]*models.Job, error) {
-	return s.jobs.ListByCreator(ctx, userID)
-}
-
-// GetByID returns a single job. Returns ErrNotFound if absent.
+// GetByID returns a single job. Returns apperr.ErrNotFound if absent.
 func (s *JobService) GetByID(ctx context.Context, id uint64) (*models.Job, error) {
 	job, err := s.jobs.FindByID(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -117,58 +88,24 @@ func (s *JobService) GetByID(ctx context.Context, id uint64) (*models.Job, error
 	return job, nil
 }
 
-// UpdateJobParams holds editable marketplace fields.
-type UpdateJobParams struct {
-	Title               string
-	Description         string
-	RequiredSkills      []string
-	Budget              string
-	ApplicationDeadline *time.Time
-	DeliveryDeadline    time.Time
-	ReferenceURL        *string
+// ListOpen returns all jobs with status OPEN.
+func (s *JobService) ListOpen(ctx context.Context) ([]*models.Job, error) {
+	return s.jobs.ListOpen(ctx)
 }
 
-// Update edits a job's marketplace fields. Only the creator may update.
-func (s *JobService) Update(ctx context.Context, jobID, callerUserID uint64, params UpdateJobParams) (*models.Job, error) {
-	job, err := s.GetByID(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	if job.CreatorUserID != callerUserID {
-		return nil, apperr.ErrForbidden
-	}
-	// Only draft and open jobs may be edited.
-	if job.MarketplaceStatus != models.MarketplaceStatusDraft &&
-		job.MarketplaceStatus != models.MarketplaceStatusOpen {
-		return nil, fmt.Errorf("%w: only draft or open jobs may be edited", apperr.ErrInvalidState)
-	}
-
-	if err := validateUpdateJob(params); err != nil {
-		return nil, err
-	}
-
-	skills, err := json.Marshal(params.RequiredSkills)
-	if err != nil {
-		return nil, fmt.Errorf("marshal required_skills: %w", err)
-	}
-
-	err = s.jobs.Update(ctx, jobID, repositories.UpdateJobParams{
-		Title:               strings.TrimSpace(params.Title),
-		Description:         strings.TrimSpace(params.Description),
-		RequiredSkills:      skills,
-		Budget:              params.Budget,
-		ApplicationDeadline: params.ApplicationDeadline,
-		DeliveryDeadline:    params.DeliveryDeadline,
-		ReferenceURL:        params.ReferenceURL,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("update job: %w", err)
-	}
-
-	return s.jobs.FindByID(ctx, jobID)
+// ListByCreator returns all jobs posted by the given user.
+func (s *JobService) ListByCreator(ctx context.Context, userID uint64) ([]*models.Job, error) {
+	return s.jobs.ListByCreator(ctx, userID)
 }
 
-// Publish transitions a job from draft to open so it accepts applications.
+// Publish transitions a job from OPEN to REVIEWING_APPLICATIONS.
+// This is a no-op stub because jobs start as OPEN — if the frontend calls
+// publish after create it is still correct to return the job unchanged when
+// it is already in a post-creation state.
+//
+// Current lifecycle: jobs are created directly as OPEN (no draft step).
+// If a draft-first flow is introduced later this method will enforce
+// the OPEN transition.
 func (s *JobService) Publish(ctx context.Context, jobID, callerUserID uint64) (*models.Job, error) {
 	job, err := s.GetByID(ctx, jobID)
 	if err != nil {
@@ -177,16 +114,90 @@ func (s *JobService) Publish(ctx context.Context, jobID, callerUserID uint64) (*
 	if job.CreatorUserID != callerUserID {
 		return nil, apperr.ErrForbidden
 	}
-	if job.MarketplaceStatus != models.MarketplaceStatusDraft {
-		return nil, fmt.Errorf("%w: only draft jobs may be published", apperr.ErrInvalidState)
-	}
-	if err := s.jobs.UpdateMarketplaceStatus(ctx, jobID, models.MarketplaceStatusOpen); err != nil {
+	// Jobs start as OPEN; there is no draft step in the current DB schema.
+	// Return the job as-is so the frontend's create→publish two-step still works.
+	return job, nil
+}
+
+// UpdateJobParams holds the fields the creator may change after posting.
+// Budget is absent — it is locked at creation and must never change.
+type UpdateJobParams struct {
+	Title               string
+	Description         string
+	RequiredSkills      []string
+	ApplicationDeadline *time.Time
+	DeliveryDeadline    time.Time
+}
+
+// Update edits the mutable metadata on a job. Only the creator may do this,
+// and only while the job is still OPEN or REVIEWING_APPLICATIONS.
+// Budget is unconditionally excluded from updates.
+func (s *JobService) Update(ctx context.Context, jobID, callerUserID uint64, params UpdateJobParams) (*models.Job, error) {
+	job, err := s.GetByID(ctx, jobID)
+	if err != nil {
 		return nil, err
 	}
+	if job.CreatorUserID != callerUserID {
+		return nil, apperr.ErrForbidden
+	}
+
+	editable := map[models.JobStatus]bool{
+		models.JobStatusOpen:                  true,
+		models.JobStatusReviewingApplications: true,
+	}
+	if !editable[job.Status] {
+		return nil, fmt.Errorf("%w: job can only be edited while OPEN or REVIEWING_APPLICATIONS", apperr.ErrInvalidState)
+	}
+
+	// Validate the incoming patch fields using the same rules as creation
+	// (minus the budget check, which cannot change here).
+	fields := map[string]string{}
+	now := time.Now().UTC()
+
+	if strings.TrimSpace(params.Title) == "" {
+		fields["title"] = "required"
+	} else if len([]rune(strings.TrimSpace(params.Title))) > 200 {
+		fields["title"] = "must be 200 characters or fewer"
+	}
+	if strings.TrimSpace(params.Description) == "" {
+		fields["description"] = "required"
+	}
+	if params.DeliveryDeadline.IsZero() {
+		fields["delivery_deadline"] = "required"
+	} else if !params.DeliveryDeadline.After(now) {
+		fields["delivery_deadline"] = "must be a future date"
+	}
+	if params.ApplicationDeadline == nil {
+		fields["application_deadline"] = "required"
+	} else if !params.ApplicationDeadline.After(now) {
+		fields["application_deadline"] = "must be a future date"
+	} else if !params.ApplicationDeadline.Before(params.DeliveryDeadline) {
+		fields["application_deadline"] = "must be before the delivery deadline"
+	}
+	if len(fields) > 0 {
+		return nil, apperr.NewValidation(fields)
+	}
+
+	skills, err := json.Marshal(params.RequiredSkills)
+	if err != nil {
+		return nil, fmt.Errorf("marshal required_skills: %w", err)
+	}
+
+	if err := s.jobs.UpdateDetails(ctx, jobID, repositories.UpdateDetailsParams{
+		Title:               strings.TrimSpace(params.Title),
+		Description:         strings.TrimSpace(params.Description),
+		RequiredSkills:      skills,
+		ApplicationDeadline: params.ApplicationDeadline,
+		DeliveryDeadline:    params.DeliveryDeadline,
+	}); err != nil {
+		return nil, fmt.Errorf("update job: %w", err)
+	}
+
 	return s.jobs.FindByID(ctx, jobID)
 }
 
-// Cancel transitions a job to cancelled. Only the creator may cancel.
+// Cancel transitions a job to CANCELLED. Only the creator may cancel.
+// Only OPEN or REVIEWING_APPLICATIONS jobs may be cancelled.
 func (s *JobService) Cancel(ctx context.Context, jobID, callerUserID uint64) (*models.Job, error) {
 	job, err := s.GetByID(ctx, jobID)
 	if err != nil {
@@ -195,15 +206,16 @@ func (s *JobService) Cancel(ctx context.Context, jobID, callerUserID uint64) (*m
 	if job.CreatorUserID != callerUserID {
 		return nil, apperr.ErrForbidden
 	}
-	cancellable := map[models.MarketplaceStatus]bool{
-		models.MarketplaceStatusDraft:                 true,
-		models.MarketplaceStatusOpen:                  true,
-		models.MarketplaceStatusReviewingApplications: true,
+
+	cancellable := map[models.JobStatus]bool{
+		models.JobStatusOpen:                  true,
+		models.JobStatusReviewingApplications: true,
 	}
-	if !cancellable[job.MarketplaceStatus] {
+	if !cancellable[job.Status] {
 		return nil, fmt.Errorf("%w: job cannot be cancelled in its current state", apperr.ErrInvalidState)
 	}
-	if err := s.jobs.UpdateMarketplaceStatus(ctx, jobID, models.MarketplaceStatusCancelled); err != nil {
+
+	if err := s.jobs.UpdateStatus(ctx, jobID, models.JobStatusCancelled); err != nil {
 		return nil, err
 	}
 	return s.jobs.FindByID(ctx, jobID)
@@ -213,55 +225,81 @@ func (s *JobService) Cancel(ctx context.Context, jobID, callerUserID uint64) (*m
 // Validation helpers
 // ===========================================================================
 
+// validateCreateJob enforces business rules on the incoming job creation
+// parameters. It does not touch the database.
 func validateCreateJob(p CreateJobParams) error {
 	fields := map[string]string{}
+
 	if strings.TrimSpace(p.Title) == "" {
 		fields["title"] = "required"
-	} else if len(p.Title) > 200 {
+	} else if len([]rune(strings.TrimSpace(p.Title))) > 200 {
 		fields["title"] = "must be 200 characters or fewer"
 	}
+
 	if strings.TrimSpace(p.Description) == "" {
 		fields["description"] = "required"
 	}
-	if p.HiringMethod != "open" && p.HiringMethod != "direct" {
-		fields["hiring_method"] = "must be 'open' or 'direct'"
+
+	if err := validateBudget(p.Budget); err != nil {
+		fields["budget"] = err.Error()
 	}
-	if strings.TrimSpace(p.Budget) == "" {
-		fields["budget"] = "required"
-	}
-	if p.DeliveryDeadline.IsZero() || p.DeliveryDeadline.Before(time.Now()) {
+
+	now := time.Now().UTC()
+
+	if p.DeliveryDeadline.IsZero() {
+		fields["delivery_deadline"] = "required"
+	} else if !p.DeliveryDeadline.After(now) {
 		fields["delivery_deadline"] = "must be a future date"
 	}
-	if p.ApplicationDeadline != nil && !p.ApplicationDeadline.After(time.Now()) {
+
+	// application_deadline is mandatory — once it passes, applications close.
+	if p.ApplicationDeadline == nil {
+		fields["application_deadline"] = "required"
+	} else if !p.ApplicationDeadline.After(now) {
 		fields["application_deadline"] = "must be a future date"
-	}
-	if p.ApplicationDeadline != nil && !p.ApplicationDeadline.Before(p.DeliveryDeadline) {
+	} else if !p.ApplicationDeadline.Before(p.DeliveryDeadline) {
 		fields["application_deadline"] = "must be before the delivery deadline"
 	}
+
 	if len(fields) > 0 {
 		return apperr.NewValidation(fields)
 	}
 	return nil
 }
 
-func validateUpdateJob(p UpdateJobParams) error {
-	fields := map[string]string{}
-	if strings.TrimSpace(p.Title) == "" {
-		fields["title"] = "required"
-	} else if len(p.Title) > 200 {
-		fields["title"] = "must be 200 characters or fewer"
+// validateBudget ensures the budget string is a positive decimal value.
+// Budget is stored as DECIMAL(36,18). We parse it with math/big to avoid
+// floating-point issues and confirm it is strictly greater than zero.
+//
+// Frontend wallet-balance validation (via viem) should guard against
+// obviously over-budget submissions before the user hits submit, but
+// the backend does not have a blockchain client in the current codebase
+// so on-chain balance verification is not performed here.
+// Delete removes the job entirely if it belongs to the creator.
+func (s *JobService) Delete(ctx context.Context, jobID, userID uint64) error {
+	job, err := s.jobs.FindByID(ctx, jobID)
+	if err != nil {
+		return err
 	}
-	if strings.TrimSpace(p.Description) == "" {
-		fields["description"] = "required"
+	if job.CreatorUserID != userID {
+		return apperr.ErrForbidden
 	}
-	if strings.TrimSpace(p.Budget) == "" {
-		fields["budget"] = "required"
+
+	return s.jobs.Delete(ctx, jobID)
+}
+
+func validateBudget(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fmt.Errorf("required")
 	}
-	if p.DeliveryDeadline.IsZero() {
-		fields["delivery_deadline"] = "required"
+	// big.Float parses decimal strings without floating-point loss.
+	f, _, err := big.ParseFloat(trimmed, 10, 128, big.ToNearestEven)
+	if err != nil {
+		return fmt.Errorf("must be a valid decimal number")
 	}
-	if len(fields) > 0 {
-		return apperr.NewValidation(fields)
+	if f.Sign() <= 0 {
+		return fmt.Errorf("must be greater than 0")
 	}
 	return nil
 }

@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowUpRight, CalendarDays, CheckCircle2, Clock3, ExternalLink, FileText, LoaderCircle, LockKeyhole, RotateCcw, Send, ShieldAlert, UserRoundCheck, Users } from 'lucide-react'
+import { ArrowLeft, CalendarDays, CheckCircle2, Clock3, ExternalLink, FileText, LoaderCircle, LockKeyhole, RotateCcw, Send, ShieldAlert, UserRoundCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import Alert from '../components/Alert'
@@ -8,9 +8,10 @@ import Modal from '../components/Modal'
 import WalletBadge from '../components/WalletBadge'
 import useApp from '../hooks/useApp'
 import { api } from '../services/api'
-import { approveAndReleasePayment, fundEscrow, refundExpiredJobOnChain, submitWorkOnChain } from '../services/blockchain'
+import { approveAndReleasePayment, budgetToWei, formatUnits, fundOpenJobOnChain, assignFreelancerOnChain, getWalletBalance, refundExpiredJobOnChain, submitWorkOnChain } from '../services/blockchain'
 import { formatDate, formatUSDC, shortenAddress } from '../utils/format'
-import { canApply, canApproveWork, canClaimRefund, canFundEscrow, canReviewApplications, canSubmitWork, getWalletApplication, hasApplicationDeadlinePassed, isJobCreator } from '../utils/permissions'
+import { canApply, canApproveWork, canClaimRefund, canFundJob, canAssignOnChain, canReviewApplications, canSubmitWork, getWalletApplication, hasApplicationDeadlinePassed, isJobCreator } from '../utils/permissions'
+import { pollJobForEscrowStatus } from '../utils/pollJob'
 
 const emptyApplication = { coverLetter: '', estimatedDays: '', portfolioUrl: '' }
 const isValidUrl = (value) => { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) } catch { return false } }
@@ -25,7 +26,7 @@ function getSkills(job) {
 
 export default function JobDetails() {
   const { id } = useParams()
-  const { walletAddress, wallet, applications, addApplication, updateApplication, updateJob, refreshJob } = useApp()
+  const { walletAddress, wallet, applications, addApplication, updateApplication, refreshJob } = useApp()
   const addr = walletAddress || wallet.address
 
   const [job, setJob] = useState(null)
@@ -40,9 +41,11 @@ export default function JobDetails() {
   const [modal, setModal] = useState(null)
   const [processing, setProcessing] = useState(false)
   const [notice, setNotice] = useState(null)
+  const [fundingError, setFundingError] = useState(null)
 
   // Load job from API on mount
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setJobLoading(true)
     api.getJob(id)
       .then((data) => {
@@ -70,8 +73,7 @@ export default function JobDetails() {
   if (jobNotFound) return <Navigate to="/404" replace />
   if (!job) return <Navigate to="/404" replace />
 
-  const hiringMethod = job.hiring_method || job.hiringMethod
-  const marketplaceStatus = (job.marketplace_status || job.marketplaceStatus || '').toLowerCase()
+  const marketplaceStatus = (job.marketplace_status || job.marketplaceStatus || job.status || '').toLowerCase()
   const escrowStatus = (job.escrow_status || job.escrowStatus || '').toLowerCase() || null
   const freelancerWallet = job.selected_freelancer_wallet || job.selectedFreelancerWallet
   const blockchainJobId = job.blockchain_job_id || job.blockchainJobId
@@ -85,11 +87,12 @@ export default function JobDetails() {
   const creator = isJobCreator(job, addr)
   const mayApply = canApply(job, addr, applications)
   const mayReview = canReviewApplications(job, addr)
-  const mayFund = canFundEscrow(job, addr)
+  const mayFund = canFundJob(job, addr)
+  const mayAssign = canAssignOnChain(job, addr)
   const maySubmit = canSubmitWork(job, addr)
   const mayApprove = canApproveWork(job, addr)
   const mayRefund = canClaimRefund(job, addr)
-  const expired = hiringMethod === 'open' && hasApplicationDeadlinePassed(job)
+  const expired = hasApplicationDeadlinePassed(job)
 
   const escrowAmount = job.budget
 
@@ -137,35 +140,57 @@ export default function JobDetails() {
 
   const confirmFunding = async () => {
     setProcessing(true)
+    setFundingError(null)
     try {
-      const result = await fundEscrow({
-        freelancerAddress: freelancerWallet,
+      const required = budgetToWei(escrowAmount)
+      let balance
+      try { balance = await getWalletBalance(addr) } catch { balance = null }
+      if (balance !== null && balance < required) {
+        const have = Number(formatUnits(balance, 18)).toFixed(4)
+        const need = Number(formatUnits(required, 18)).toFixed(4)
+        setFundingError(`Insufficient balance. You need ${need} USDC but your wallet only has ${have} USDC on Arc Testnet.`)
+        setProcessing(false)
+        return
+      }
+
+      await fundOpenJobOnChain({
         deliveryDeadlineISO: deliveryDeadline,
         metadataHashInput: String(job.id),
         budgetString: escrowAmount,
         clientAddress: addr,
       })
-      // Blockchain confirmed. The backend arc_listener is not yet implemented, so
-      // the backend job row won't auto-update escrow_status or blockchain_job_id.
-      // Apply the confirmed on-chain state locally so the UI unlocks correctly.
-      const patch = {
-        escrow_status: 'funded',
-        marketplace_status: 'in_progress',
-        blockchain_job_id: result.blockchainJobId,
-        funding_transaction_hash: result.transactionHash,
-      }
-      const patched = { ...job, ...patch }
-      setJob(patched)
-      updateJob(job.id, patch)
       setModal(null)
-      setNotice({
-        variant: 'success',
-        title: 'Escrow funded — blockchain confirmed',
-        message: `Transaction confirmed: ${result.transactionHash}. On-chain Job ID: ${result.blockchainJobId}. The freelancer can now submit work.`,
-      })
+      setNotice({ variant: 'info', title: 'Transaction sent', message: 'Waiting for blockchain confirmation...' })
+      
+      const updatedJob = await pollJobForEscrowStatus(job.id, 'any')
+      setJob(updatedJob)
+      refreshJob(job.id)
+      
+      setNotice({ variant: 'success', title: 'Escrow funded', message: `Job is now funded on-chain.` })
     } catch (err) {
-      setNotice({ variant: 'error', title: 'Funding failed', message: err.message })
+      setFundingError(err.message || 'Transaction failed. Please try again.')
+    } finally {
+      setProcessing(false)
+    }
+  }
+
+  const confirmAssignment = async () => {
+    setProcessing(true)
+    try {
+      if (!blockchainJobId) throw new Error('No on-chain job ID found.')
+      await assignFreelancerOnChain({
+        blockchainJobId,
+        freelancerAddress: freelancerWallet,
+        clientAddress: addr,
+      })
       setModal(null)
+      setNotice({ variant: 'info', title: 'Transaction sent', message: 'Waiting for blockchain confirmation...' })
+      const updatedJob = await pollJobForEscrowStatus(job.id, 'funded')
+      setJob(updatedJob)
+      refreshJob(job.id)
+      setNotice({ variant: 'success', title: 'Freelancer assigned', message: 'The escrow is now fully funded for this freelancer.' })
+    } catch (err) {
+      setNotice({ variant: 'error', title: 'Assignment failed', message: err.message })
     } finally {
       setProcessing(false)
     }
@@ -183,28 +208,27 @@ export default function JobDetails() {
   const confirmSubmission = async () => {
     setProcessing(true)
     try {
-      // If the escrow is funded on-chain (has a blockchain_job_id), submit on-chain first.
-      // The contract enforces that only the assigned freelancer can call submitWork.
+      // Record the offchain submission in the backend regardless.
+      await api.createSubmission(job.id, {
+        submission_url: submissionForm.url,
+        notes: submissionForm.notes,
+      })
+
       if (blockchainJobId) {
         await submitWorkOnChain({
           blockchainJobId,
           submissionUrl: submissionForm.url,
           freelancerAddress: addr,
         })
-        // Blockchain confirmed submitWork. The backend arc_listener is not yet
-        // implemented, so the backend escrow_status won't update to work_submitted.
-        // Patch local state so canApproveWork opens on the client's side.
-        const patch = { escrow_status: 'work_submitted' }
-        setJob((prev) => ({ ...prev, ...patch }))
-        updateJob(job.id, patch)
+        setModal(null)
+        setNotice({ variant: 'info', title: 'Transaction sent', message: 'Waiting for blockchain confirmation...' })
+        const updatedJob = await pollJobForEscrowStatus(job.id, 'work_submitted')
+        setJob(updatedJob)
+        refreshJob(job.id)
+      } else {
+        setModal(null)
       }
-      // Record the offchain submission in the backend regardless.
-      await api.createSubmission(job.id, {
-        submission_url: submissionForm.url,
-        notes: submissionForm.notes,
-      })
       setSubmission({ submission_url: submissionForm.url, notes: submissionForm.notes })
-      setModal(null)
       setNotice({ variant: 'success', title: 'Work submitted', message: 'The client can now review your delivery.' })
     } catch (err) {
       setNotice({ variant: 'error', title: 'Submission failed', message: err.message })
@@ -220,16 +244,12 @@ export default function JobDetails() {
         throw new Error('No on-chain job ID. Escrow must be funded on blockchain before approval.')
       }
       await approveAndReleasePayment({ blockchainJobId, clientAddress: addr })
-      // Blockchain confirmed approveAndRelease — payment is released to the freelancer.
-      // The backend arc_listener is not yet implemented, so patch local state directly.
-      const patch = {
-        escrow_status: 'completed',
-        marketplace_status: 'completed',
-      }
-      setJob((prev) => ({ ...prev, ...patch }))
-      updateJob(job.id, patch)
       setModal(null)
-      setNotice({ variant: 'success', title: 'Payment released — blockchain confirmed', message: 'The payment has been released to the freelancer. The escrow is now closed.' })
+      setNotice({ variant: 'info', title: 'Transaction sent', message: 'Waiting for blockchain confirmation...' })
+      const updatedJob = await pollJobForEscrowStatus(job.id, 'completed')
+      setJob(updatedJob)
+      refreshJob(job.id)
+      setNotice({ variant: 'success', title: 'Payment released', message: 'The payment has been released to the freelancer. The escrow is now closed.' })
     } catch (err) {
       setNotice({ variant: 'error', title: 'Approval failed', message: err.message })
       setModal(null)
@@ -245,15 +265,12 @@ export default function JobDetails() {
         throw new Error('No on-chain job ID. Escrow must be funded on blockchain before refund.')
       }
       await refundExpiredJobOnChain({ blockchainJobId, clientAddress: addr })
-      // Blockchain confirmed refundExpiredJob — patch local state directly.
-      const patch = {
-        escrow_status: 'refunded',
-        marketplace_status: 'cancelled',
-      }
-      setJob((prev) => ({ ...prev, ...patch }))
-      updateJob(job.id, patch)
       setModal(null)
-      setNotice({ variant: 'success', title: 'Refund confirmed — blockchain confirmed', message: 'The escrow has been refunded to your wallet.' })
+      setNotice({ variant: 'info', title: 'Transaction sent', message: 'Waiting for blockchain confirmation...' })
+      const updatedJob = await pollJobForEscrowStatus(job.id, 'refunded')
+      setJob(updatedJob)
+      refreshJob(job.id)
+      setNotice({ variant: 'success', title: 'Refund confirmed', message: 'The escrow has been refunded to your wallet.' })
     } catch (err) {
       setNotice({ variant: 'error', title: 'Refund failed', message: err.message })
       setModal(null)
@@ -264,14 +281,14 @@ export default function JobDetails() {
 
   return (
     <>
-      <Link to={hiringMethod === 'open' ? '/explore' : '/jobs'} className="mb-5 inline-flex items-center gap-2 text-sm font-bold text-slate-500 hover:text-slate-900">
-        <ArrowLeft className="size-4" />Back to {hiringMethod === 'open' ? 'explore' : 'jobs'}
+      <Link to="/explore" className="mb-5 inline-flex items-center gap-2 text-sm font-bold text-slate-500 hover:text-slate-900">
+        <ArrowLeft className="size-4" />Back to explore
       </Link>
       <header className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-bold tracking-[0.12em] text-slate-400 uppercase">#{job.id}</span>
-            <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-600">{hiringMethod === 'open' ? 'Open for Applications' : 'Direct Hire'}</span>
+            <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-600">Open for Applications</span>
             {creator && <span className="rounded-full bg-mint-50 px-2 py-1 text-[11px] font-bold text-mint-600">You posted this job</span>}
           </div>
           <h1 className="mt-3 font-display text-2xl font-bold tracking-tight text-ink-950 sm:text-3xl">{job.title}</h1>
@@ -285,7 +302,7 @@ export default function JobDetails() {
           <Alert variant={notice.variant} title={notice.title} onDismiss={() => setNotice(null)}>{notice.message}</Alert>
         </div>
       )}
-      {hiringMethod === 'open' && !escrowStatus && (
+      {!escrowStatus && (
         <div className="mb-6">
           <Alert variant="info" title="Marketplace job — escrow not funded">No USDC is locked while applications are being reviewed. Funding happens only after a freelancer is selected.</Alert>
         </div>
@@ -329,17 +346,6 @@ export default function JobDetails() {
                   <dd><WalletBadge address={freelancerWallet} /></dd>
                 </div>
               )}
-              {hiringMethod === 'open' && (
-                <div>
-                  <dt className="text-xs text-slate-500">Reference material</dt>
-                  <dd>
-                    {job.reference_url || job.referenceUrl
-                      ? <a href={job.reference_url || job.referenceUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-sm font-bold text-mint-600 hover:underline">Open reference <ArrowUpRight className="size-4" /></a>
-                      : <span className="text-sm text-slate-400">None</span>
-                    }
-                  </dd>
-                </div>
-              )}
             </dl>
           </section>
 
@@ -354,13 +360,19 @@ export default function JobDetails() {
                 </div>
               </div>
             </section>
+          )}          {mayFund && (
+            <section className="card border-amber-200 p-5 sm:p-6">
+              <h2 className="font-display text-lg font-bold text-ink-950">Job saved — funding required</h2>
+              <p className="mt-2 text-sm leading-6 text-slate-600">The job is not visible to freelancers until the escrow is created and funded on-chain.</p>
+              <button type="button" onClick={() => { setFundingError(null); setModal('fund') }} className="btn-dark mt-4"><LockKeyhole className="size-4" />Fund this job</button>
+            </section>
           )}
 
-          {mayFund && (
+          {mayAssign && (
             <section className="card border-amber-200 p-5 sm:p-6">
-              <h2 className="font-display text-lg font-bold text-ink-950">Freelancer selected — funding required</h2>
-              <p className="mt-2 text-sm leading-6 text-slate-600">The job will not begin until the escrow is created and funded on-chain.</p>
-              <button type="button" onClick={() => setModal('fund')} className="btn-dark mt-4"><LockKeyhole className="size-4" />Create and Fund Escrow</button>
+              <h2 className="font-display text-lg font-bold text-ink-950">Freelancer selected — assignment required</h2>
+              <p className="mt-2 text-sm leading-6 text-slate-600">The job will not begin until the freelancer is assigned to the on-chain escrow.</p>
+              <button type="button" onClick={() => { setModal('assign') }} className="btn-dark mt-4"><LockKeyhole className="size-4" />Confirm freelancer on-chain</button>
             </section>
           )}
 
@@ -437,7 +449,7 @@ export default function JobDetails() {
                 <p className="mt-2 text-sm leading-6 text-slate-600">Send a proposal to the client. Applying does not create a blockchain transaction.</p>
                 <button type="button" onClick={() => setModal('apply')} className="btn-dark mt-5 w-full">Apply for Job</button>
               </>
-            ) : creator && hiringMethod === 'open' ? (
+            ) : creator ? (
               <Link to={`/jobs/${job.id}/applications`} className="btn-dark mt-4 w-full">Review Applications</Link>
             ) : expired && !walletApplication ? (
               <Alert variant="warning" title="Applications closed">The application deadline has passed.</Alert>
@@ -513,7 +525,7 @@ export default function JobDetails() {
       </Modal>
 
       {/* Fund escrow modal */}
-      <Modal open={modal === 'fund'} onClose={() => !processing && setModal(null)} title="Create and Fund Escrow" description="This will send a real transaction on Arc Testnet." actions={
+      <Modal open={modal === 'fund'} onClose={() => !processing && setModal(null)} title="Fund this job" description="This will send a real transaction on Arc Testnet." actions={
         <>
           <button type="button" onClick={() => setModal(null)} disabled={processing} className="btn-secondary">Go Back</button>
           <button type="button" onClick={confirmFunding} disabled={processing} className="btn-dark">
@@ -522,14 +534,33 @@ export default function JobDetails() {
         </>
       }>
         <dl className="space-y-3 rounded-xl bg-slate-50 p-4 text-sm">
-          <div className="flex justify-between gap-4"><dt className="text-slate-500">Selected freelancer</dt><dd className="font-mono text-xs">{shortenAddress(freelancerWallet, 8, 6)}</dd></div>
           <div className="flex justify-between gap-4"><dt className="text-slate-500">Escrow amount</dt><dd className="font-bold">{formatUSDC(escrowAmount)}</dd></div>
           <div className="flex justify-between gap-4"><dt className="text-slate-500">Delivery deadline</dt><dd className="font-bold">{formatDate(deliveryDeadline)}</dd></div>
           <div className="flex justify-between gap-4"><dt className="text-slate-500">Network</dt><dd className="font-bold">Arc Testnet</dd></div>
         </dl>
+        {fundingError && (
+          <div className="mt-4">
+            <Alert variant="error" title="Cannot fund escrow">{fundingError}</Alert>
+          </div>
+        )}
         <div className="mt-4">
           <Alert variant="warning"><span className="inline-flex gap-2"><ShieldAlert className="size-4 shrink-0" />Blockchain transactions are irreversible. Verify all details before confirming.</span></Alert>
         </div>
+      </Modal>
+
+      {/* Assign freelancer modal */}
+      <Modal open={modal === 'assign'} onClose={() => !processing && setModal(null)} title="Confirm freelancer on-chain" description="This will assign the selected freelancer to the existing escrow." actions={
+        <>
+          <button type="button" onClick={() => setModal(null)} disabled={processing} className="btn-secondary">Go Back</button>
+          <button type="button" onClick={confirmAssignment} disabled={processing} className="btn-dark">
+            {processing ? <><LoaderCircle className="size-4 animate-spin" />Processing…</> : 'Confirm Assignment'}
+          </button>
+        </>
+      }>
+        <dl className="space-y-3 rounded-xl bg-slate-50 p-4 text-sm">
+          <div className="flex justify-between gap-4"><dt className="text-slate-500">Selected freelancer</dt><dd className="font-mono text-xs">{shortenAddress(freelancerWallet, 8, 6)}</dd></div>
+          <div className="flex justify-between gap-4"><dt className="text-slate-500">Network</dt><dd className="font-bold">Arc Testnet</dd></div>
+        </dl>
       </Modal>
 
       {/* Submit work confirmation modal */}

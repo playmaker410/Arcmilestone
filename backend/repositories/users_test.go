@@ -7,92 +7,167 @@ import (
 	"arcmilestone/models"
 )
 
-// TestCreateUserParamsHasNoPasswordFields verifies that wallet creation params
-// do not include any credential or secret fields. ArcMilestone uses wallet-
-// signature authentication; passwords and key material must never be stored.
-func TestCreateUserParamsHasNoPasswordFields(t *testing.T) {
-	forbidden := []string{"Password", "PasswordHash", "PrivateKey", "SeedPhrase"}
+// TestCreateUserParamsHasNoCredentials verifies that creating a user
+// does not require or accept passwords, private keys, or seed phrases.
+//
+// ArcMilestone uses wallet-signature authentication instead of passwords.
+func TestCreateUserParamsHasNoCredentials(t *testing.T) {
+	forbidden := []string{
+		"Password",
+		"PasswordHash",
+		"PrivateKey",
+		"SeedPhrase",
+	}
+
 	paramsType := reflect.TypeOf(CreateUserParams{})
-	for i := range paramsType.NumField() {
-		name := paramsType.Field(i).Name
-		for _, bad := range forbidden {
-			if name == bad {
-				t.Errorf("CreateUserParams must not contain %q; wallet-signature auth is used instead", bad)
+
+	for i := 0; i < paramsType.NumField(); i++ {
+		fieldName := paramsType.Field(i).Name
+
+		for _, forbiddenName := range forbidden {
+			if fieldName == forbiddenName {
+				t.Errorf(
+					"CreateUserParams must not contain %q",
+					forbiddenName,
+				)
 			}
 		}
 	}
 }
 
-// TestCreateUserParamsWalletAddressRequired verifies that WalletAddress is a
-// non-pointer string — it is required and must not be nullable.
-func TestCreateUserParamsWalletAddressRequired(t *testing.T) {
+// TestCreateUserParamsRequiresWalletAddress verifies that WalletAddress
+// exists and is a required string.
+//
+// Username is intentionally not part of CreateUserParams because a new user
+// chooses a username later from the dashboard.
+func TestCreateUserParamsRequiresWalletAddress(t *testing.T) {
 	paramsType := reflect.TypeOf(CreateUserParams{})
+
 	field, ok := paramsType.FieldByName("WalletAddress")
 	if !ok {
 		t.Fatal("CreateUserParams is missing WalletAddress")
 	}
+
 	if field.Type.Kind() != reflect.String {
-		t.Errorf("WalletAddress must be a non-pointer string (required); got %v", field.Type)
+		t.Errorf(
+			"WalletAddress must be a non-pointer string; got %v",
+			field.Type,
+		)
 	}
 }
 
-// TestCreateUserParamsEmailIsOptional verifies that Email is a pointer so it
-// can be omitted. Email is not the authentication identity.
-func TestCreateUserParamsEmailIsOptional(t *testing.T) {
+// TestCreateUserParamsDoesNotContainUsername verifies that username is not
+// required when the wallet account is first created.
+//
+// The intended flow is:
+// wallet connects -> user is created -> username is chosen later.
+func TestCreateUserParamsDoesNotContainUsername(t *testing.T) {
 	paramsType := reflect.TypeOf(CreateUserParams{})
-	field, ok := paramsType.FieldByName("Email")
-	if !ok {
-		t.Fatal("CreateUserParams is missing Email field")
-	}
-	if field.Type.Kind() != reflect.Ptr {
-		t.Errorf("Email must be *string (optional); got %v", field.Type)
+
+	if _, ok := paramsType.FieldByName("Username"); ok {
+		t.Error(
+			"CreateUserParams should not contain Username; " +
+				"username is set later from the dashboard",
+		)
 	}
 }
 
-// TestNormalizeWalletAddressLowercases verifies that wallet addresses are
-// normalized to lowercase before any database operation. The UNIQUE constraint
-// on wallet_address is case-sensitive (ascii_bin), so normalization must be
-// consistent to prevent duplicate users from different address casings.
-func TestNormalizeWalletAddressLowercases(t *testing.T) {
+// TestUpdateUsernameParamsRequiresUsername verifies that username is the
+// field accepted when updating a user's username.
+func TestUpdateUsernameParamsRequiresUsername(t *testing.T) {
+	paramsType := reflect.TypeOf(UpdateUsernameParams{})
+
+	field, ok := paramsType.FieldByName("Username")
+	if !ok {
+		t.Fatal("UpdateUsernameParams is missing Username")
+	}
+
+	if field.Type.Kind() != reflect.String {
+		t.Errorf(
+			"Username must be a string; got %v",
+			field.Type,
+		)
+	}
+}
+
+// TestNormalizeWalletAddress verifies that wallet addresses are normalized
+// consistently before they are stored or searched.
+func TestNormalizeWalletAddress(t *testing.T) {
 	tests := []struct {
+		name  string
 		input string
 		want  string
 	}{
-		{"0x71C4A6F2B8e90D3aE4217B6c9fD12A5e8C34091F", "0x71c4a6f2b8e90d3ae4217b6c9fd12a5e8c34091f"},
-		{"0xABCDEF", "0xabcdef"},
-		{"0xabcdef", "0xabcdef"},
-		{"  0xABC  ", "0xabc"},
+		{
+			name:  "uppercase address",
+			input: "0xABCDEF",
+			want:  "0xabcdef",
+		},
+		{
+			name:  "already lowercase",
+			input: "0xabcdef",
+			want:  "0xabcdef",
+		},
+		{
+			name:  "address with spaces",
+			input: "  0xABCDEF  ",
+			want:  "0xabcdef",
+		},
+		{
+			name:  "mixed case address",
+			input: "0x71C4A6F2B8e90D3aE4217B6c9fD12A5e8C34091F",
+			want:  "0x71c4a6f2b8e90d3ae4217b6c9fd12a5e8c34091f",
+		},
 	}
-	for _, tc := range tests {
-		got := normalizeWalletAddress(tc.input)
-		if got != tc.want {
-			t.Errorf("normalizeWalletAddress(%q) = %q, want %q", tc.input, got, tc.want)
-		}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeWalletAddress(tt.input)
+
+			if got != tt.want {
+				t.Errorf(
+					"normalizeWalletAddress(%q) = %q, want %q",
+					tt.input,
+					got,
+					tt.want,
+				)
+			}
+		})
 	}
 }
 
-// TestDuplicateWalletAddressNormalization verifies that two different casings
-// of the same wallet address normalize to identical strings. This is the
-// application-level enforcement that backs the UNIQUE(wallet_address) constraint.
-func TestDuplicateWalletAddressNormalization(t *testing.T) {
+// TestSameWalletAddressNormalizesTheSame verifies that the same wallet
+// address written with different casing produces the same stored/search value.
+func TestSameWalletAddressNormalizesTheSame(t *testing.T) {
 	addr1 := "0x71C4A6F2B8e90D3aE4217B6c9fD12A5e8C34091F"
 	addr2 := "0x71c4a6f2b8e90d3ae4217b6c9fd12a5e8c34091f"
-	if normalizeWalletAddress(addr1) != normalizeWalletAddress(addr2) {
-		t.Error("same wallet address in different cases must normalize to the same string to prevent duplicate users")
+
+	got1 := normalizeWalletAddress(addr1)
+	got2 := normalizeWalletAddress(addr2)
+
+	if got1 != got2 {
+		t.Errorf(
+			"same wallet address should normalize to the same value: %q != %q",
+			got1,
+			got2,
+		)
 	}
 }
 
-// TestUserModelWalletAddressUniquenessSemantics verifies the model field used
-// as the unique identifier. The database UNIQUE constraint and the application
-// normalization together guarantee one user per wallet address.
-func TestUserModelWalletAddressUniquenessSemantics(t *testing.T) {
+// TestUserModelHasWalletAddress verifies that the User model contains the
+// wallet address used as the user's wallet identity.
+func TestUserModelHasWalletAddress(t *testing.T) {
 	userType := reflect.TypeOf(models.User{})
+
 	field, ok := userType.FieldByName("WalletAddress")
 	if !ok {
 		t.Fatal("models.User is missing WalletAddress")
 	}
-	// Must be a required (non-pointer) string.
+
 	if field.Type.Kind() != reflect.String {
-		t.Errorf("WalletAddress must be a required non-pointer string; got %v", field.Type)
+		t.Errorf(
+			"WalletAddress must be a non-pointer string; got %v",
+			field.Type,
+		)
 	}
 }

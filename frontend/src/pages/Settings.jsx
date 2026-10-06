@@ -1,4 +1,4 @@
-import { Bell, CheckCircle2, LoaderCircle, Mail, Monitor, Save, ShieldCheck, UserRound, WalletCards } from 'lucide-react'
+import { AtSign, Bell, CheckCircle2, LoaderCircle, Mail, Monitor, Save, ShieldCheck, UserRound, WalletCards } from 'lucide-react'
 import { useState } from 'react'
 import Alert from '../components/Alert'
 import FormField from '../components/FormField'
@@ -7,37 +7,115 @@ import WalletBadge from '../components/WalletBadge'
 import useApp from '../hooks/useApp'
 import { api } from '../services/api'
 
+/**
+ * Username validation rules — kept consistent with UsernameSetupModal.
+ * The Settings page lets users change their username after initial setup,
+ * so the same rules must apply.
+ */
+const USERNAME_MIN = 3
+const USERNAME_MAX = 20
+const USERNAME_PATTERN = /^[a-zA-Z0-9_]+$/
+const RESERVED_USERNAMES = new Set([
+  'admin', 'administrator', 'support', 'help', 'arcmilestone',
+  'arc', 'system', 'moderator', 'mod', 'staff', 'official',
+  'root', 'superuser', 'null', 'undefined',
+])
+
+/**
+ * Validate a username string.
+ * @param {string} value
+ * @returns {string} Error message, or '' when valid.
+ */
+function validateUsername(value) {
+  if (!value) return 'Username is required.'
+  if (value.length < USERNAME_MIN) return `Must be at least ${USERNAME_MIN} characters.`
+  if (value.length > USERNAME_MAX) return `Cannot exceed ${USERNAME_MAX} characters.`
+  if (!USERNAME_PATTERN.test(value)) return 'Only letters, numbers, and underscores are allowed.'
+  if (RESERVED_USERNAMES.has(value.toLowerCase())) return 'That username is reserved.'
+  return ''
+}
+
 export default function Settings() {
-  const { wallet, user } = useApp()
+  const { wallet, user, setUserUsername } = useApp()
 
   const [form, setForm] = useState({
-    displayName: user?.display_name || wallet.displayName || '',
+    /**
+     * Seed the username field from user.username (the unique identity) with a
+     * fallback to an empty string so the field starts blank for new users who
+     * skipped the setup modal (edge case).
+     *
+     * display_name is intentionally removed — username is now the single
+     * human-friendly, unique identifier on the platform.
+     */
+    username: user?.username || '',
     email: user?.email || wallet.email || '',
     appearance: 'system',
     jobUpdates: true,
     transactionUpdates: true,
     productNews: false,
   })
+
+  /** Per-field validation error for the username input. */
+  const [usernameError, setUsernameError] = useState('')
+
   const [saved, setSaved] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
 
   const handleChange = (event) => {
     const { name, value, checked, type } = event.target
-    setForm((current) => ({ ...current, [name]: type === 'checkbox' ? checked : value }))
+    const nextValue = type === 'checkbox' ? checked : value
+
+    // Live-validate the username field as the user types
+    if (name === 'username') {
+      // Strip spaces immediately (same behaviour as UsernameSetupModal)
+      const stripped = String(nextValue).replace(/\s/g, '')
+      setForm((current) => ({ ...current, username: stripped }))
+      setUsernameError(validateUsername(stripped))
+    } else {
+      setForm((current) => ({ ...current, [name]: nextValue }))
+    }
+
     setSaved(false)
     setSaveError('')
   }
 
   const handleSave = async (event) => {
     event.preventDefault()
+
+    // Re-validate before submitting
+    const err = validateUsername(form.username)
+    if (err) { setUsernameError(err); return }
+
     setSaving(true)
     setSaveError('')
     try {
+      /**
+       * BACKEND REQUIRED:
+       *   PATCH /api/users/me
+       *   Body: { "username": "<value>", "email": "<value>" }
+       *
+       *   The backend must:
+       *     1. Enforce UNIQUE on users.username so a race-condition takeover
+       *        is impossible — return HTTP 409 with an informative error message.
+       *     2. Apply the same 3-20 chars / letters+digits+underscore validation
+       *        as a secondary guard (frontend validation is UX, not security).
+       *
+       *   api.updateMyProfile is used here because it calls PATCH /api/users/me
+       *   which is the same endpoint api.setUsername targets.  Both are wired
+       *   to the same backend handler — only the request body differs.
+       */
       await api.updateMyProfile({
-        display_name: form.displayName.trim() || null,
+        username: form.username.trim() || null,
         email: form.email.trim() || null,
       })
+
+      // Sync the username change into local context so the Sidebar and
+      // Overview immediately reflect the updated handle without a page reload.
+      if (setUserUsername && form.username.trim()) {
+        setUserUsername(form.username.trim())
+      }
+
       setSaved(true)
       window.setTimeout(() => setSaved(false), 3500)
     } catch (err) {
@@ -71,8 +149,43 @@ export default function Settings() {
               </div>
             </div>
             <div className="mt-5 grid gap-5 sm:grid-cols-2">
-              <FormField label="Display name" htmlFor="displayName">
-                {({ describedBy }) => <input id="displayName" name="displayName" value={form.displayName} onChange={handleChange} className="field-input" aria-describedby={describedBy} />}
+              {/*
+               * Username field — replaces the old "Display name" field.
+               *
+               * The @ icon prefix visually matches the UsernameSetupModal so
+               * the design language for usernames is consistent across the app.
+               *
+               * Inline validation error is passed to FormField so it renders
+               * with the red helper text and accessible aria-describedby link.
+               */}
+              <FormField
+                label="Username"
+                htmlFor="username"
+                description={`${USERNAME_MIN}–${USERNAME_MAX} chars · letters, numbers, underscores`}
+                error={usernameError}
+              >
+                {({ describedBy }) => (
+                  <div className="relative">
+                    <span
+                      className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5"
+                      aria-hidden="true"
+                    >
+                      <AtSign className="size-4 text-slate-400" />
+                    </span>
+                    <input
+                      id="username"
+                      name="username"
+                      type="text"
+                      autoComplete="username"
+                      spellCheck={false}
+                      maxLength={USERNAME_MAX}
+                      value={form.username}
+                      onChange={handleChange}
+                      className={`field-input pl-9 ${usernameError ? 'field-input-error' : ''}`}
+                      aria-describedby={describedBy}
+                    />
+                  </div>
+                )}
               </FormField>
               <FormField label="Email address" htmlFor="email" description="Used for notification preferences.">
                 {({ describedBy }) => (

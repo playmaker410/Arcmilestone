@@ -10,32 +10,31 @@ import (
 	"arcmilestone/models"
 )
 
-// UserRepository contains only user persistence operations. The database pool
-// is injected so this repository does not create global mutable state.
+// UserRepository contains persistence operations for users.
+// The database pool is injected so the repository does not create
+// global mutable database state.
 type UserRepository struct {
 	db *sql.DB
 }
 
-// CreateUserParams contains the user fields accepted during creation. Wallet
-// secrets are intentionally absent: only the public wallet address is stored.
+// CreateUserParams contains the fields required to create a user.
+//
+// A new user only needs a wallet address.
+// Username is intentionally not included because it is chosen later
+// from the dashboard after wallet authentication.
 type CreateUserParams struct {
 	WalletAddress string
-	DisplayName   *string
-	Email         *string
 }
 
-// UpdateUserProfileParams contains the only profile fields this repository may
-// update. User IDs, wallet addresses, and creation timestamps remain immutable.
-type UpdateUserProfileParams struct {
-	DisplayName *string
-	Email       *string
+// UpdateUsernameParams contains the username selected by the user.
+type UpdateUsernameParams struct {
+	Username string
 }
 
 const userColumns = `
 	id,
 	wallet_address,
-	display_name,
-	email,
+	username,
 	created_at,
 	updated_at`
 
@@ -44,24 +43,30 @@ func NewUserRepository(db *sql.DB) *UserRepository {
 	return &UserRepository{db: db}
 }
 
-// Create inserts a user and returns the database-generated internal ID.
-// Wallet addresses are normalized to lowercase at this database boundary.
+// Create inserts a new user with a wallet address.
+//
+// Username is intentionally left NULL because a new user chooses
+// their username later from the dashboard
 func (r *UserRepository) Create(ctx context.Context, params CreateUserParams) (uint64, error) {
-	result, err := r.db.ExecContext(ctx, `
-		INSERT INTO users (wallet_address, display_name, email)
-		VALUES (?, ?, ?)`,
-		normalizeWalletAddress(params.WalletAddress),
-		params.DisplayName,
-		params.Email,
-	)
+
+	WalletAdress := normalizeWalletAddress(params.WalletAddress)
+
+	if WalletAdress == "" {
+		return 0, fmt.Errorf("create user: wallet address is required")
+	}
+
+	result, err := r.db.ExecContext(ctx, `INSERT INTO users(wallet_address) VALUE(?)`, WalletAdress)
+
 	if err != nil {
-		return 0, fmt.Errorf("create user: %w", err)
+		return 0, fmt.Errorf("create user %w", err)
 	}
 
 	lastID, err := result.LastInsertId()
+
 	if err != nil {
 		return 0, fmt.Errorf("read created user ID: %w", err)
 	}
+
 	if lastID < 0 {
 		return 0, fmt.Errorf("read created user ID: database returned a negative ID")
 	}
@@ -69,8 +74,10 @@ func (r *UserRepository) Create(ctx context.Context, params CreateUserParams) (u
 	return uint64(lastID), nil
 }
 
-// FindByID returns a user by its internal database ID. A missing user is
-// returned as an error wrapping sql.ErrNoRows.
+// FindByID returns a user by the internal database ID.
+//
+// sql.ErrNoRows is wrapped and returned when the user does not exist.
+
 func (r *UserRepository) FindByID(ctx context.Context, id uint64) (*models.User, error) {
 	user, err := scanUser(r.db.QueryRowContext(ctx,
 		"SELECT "+userColumns+" FROM users WHERE id = ?",
@@ -83,7 +90,11 @@ func (r *UserRepository) FindByID(ctx context.Context, id uint64) (*models.User,
 	return user, nil
 }
 
-// FindByWalletAddress returns a user by normalized lowercase wallet address.
+// FindByWalletAddress returns the user associated with a wallet address.
+//
+// This is the important lookup for your returning-user flow:
+//
+// wallet address -> existing user -> user ID -> dashboard data
 func (r *UserRepository) FindByWalletAddress(ctx context.Context, walletAddress string) (*models.User, error) {
 	user, err := scanUser(r.db.QueryRowContext(ctx,
 		"SELECT "+userColumns+" FROM users WHERE wallet_address = ?",
@@ -96,54 +107,67 @@ func (r *UserRepository) FindByWalletAddress(ctx context.Context, walletAddress 
 	return user, nil
 }
 
-// FindByEmail returns a user by exact email value. An empty string is queried
-// as an empty string; it is never silently converted into SQL NULL.
-func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*models.User, error) {
-	user, err := scanUser(r.db.QueryRowContext(ctx,
-		"SELECT "+userColumns+" FROM users WHERE email = ?",
-		email,
-	))
-	if err != nil {
-		return nil, fmt.Errorf("find user by email: %w", err)
+// UpdateUsername sets the username for an existing user.
+//
+// The wallet address and user ID are intentionally not changed here.
+func (r *UserRepository) UpdateUsername(
+	ctx context.Context,
+	userID uint64,
+	params UpdateUsernameParams,
+) error {
+	username := strings.TrimSpace(params.Username)
+
+	if username == "" {
+		return fmt.Errorf("update username: username is required")
 	}
 
-	return user, nil
-}
-
-// UpdateProfile updates only display_name and email. It returns a wrapped
-// sql.ErrNoRows when the requested user does not exist, including when MySQL
-// reports zero affected rows because the supplied values were unchanged.
-func (r *UserRepository) UpdateProfile(ctx context.Context, userID uint64, params UpdateUserProfileParams) error {
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE users
-		SET display_name = ?, email = ?
+		SET username = ?
 		WHERE id = ?`,
-		params.DisplayName,
-		params.Email,
+		username,
 		userID,
 	)
 	if err != nil {
-		return fmt.Errorf("update user profile: %w", err)
+		return fmt.Errorf("update username: %w", err)
 	}
 
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("check updated user profile: %w", err)
+		return fmt.Errorf("check updated username: %w", err)
 	}
+
 	if affected > 0 {
 		return nil
 	}
 
+	// Some MySQL configurations report 0 affected rows when the supplied
+	// username is already the current value. Check whether the user exists
+	// before deciding that the user ID is invalid.
+
 	var existingID uint64
+
 	err = r.db.QueryRowContext(ctx, "SELECT id FROM users WHERE id = ?", userID).Scan(&existingID)
+
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("update user profile: %w", sql.ErrNoRows)
 	}
+
 	if err != nil {
-		return fmt.Errorf("confirm user exists after profile update: %w", err)
+		return fmt.Errorf("confirm user exists after username update: %w", err)
 	}
 
 	return nil
+}
+
+// CheckUsernameExists returns true if the username is already taken.
+func (r *UserRepository) CheckUsernameExists(ctx context.Context, username string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?)", username).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check username exists: %w", err)
+	}
+	return exists, nil
 }
 
 type rowScanner interface {
@@ -155,8 +179,7 @@ func scanUser(row rowScanner) (*models.User, error) {
 	if err := row.Scan(
 		&user.ID,
 		&user.WalletAddress,
-		&user.DisplayName,
-		&user.Email,
+		&user.Username,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	); err != nil {
@@ -165,6 +188,9 @@ func scanUser(row rowScanner) (*models.User, error) {
 
 	return user, nil
 }
+
+// normalizeWalletAddress ensures wallet addresses are stored and searched
+// consistently.
 
 func normalizeWalletAddress(walletAddress string) string {
 	return strings.ToLower(strings.TrimSpace(walletAddress))

@@ -22,6 +22,8 @@ export default function AppProvider({ children }) {
   const [notifications, setNotifications] = useState([])
   const [unreadCount, setUnreadCount] = useState(0)
 
+  // ── TEMPORARY: session restore commented out while auth is bypassed ─────────
+  // Restore session on mount
   // Restore session on mount
   useEffect(() => {
     const token = api.getToken()
@@ -37,6 +39,9 @@ export default function AppProvider({ children }) {
       })
       .finally(() => setAuthLoading(false))
   }, [])
+  // ── END TEMPORARY ────────────────────────────────────────────────────────────
+
+
 
   // Listen for session expiry (401 from any API call)
   useEffect(() => {
@@ -70,7 +75,7 @@ export default function AppProvider({ children }) {
         const result = await api.nonce(address)
         nonce = result.nonce
       } catch (err) {
-        throw new Error(`Could not get sign-in challenge: ${err.message}`)
+        throw new Error(`Could not get sign in challenge: ${err.message}`)
       }
 
       // 3. Sign the nonce with the wallet
@@ -78,7 +83,6 @@ export default function AppProvider({ children }) {
       try {
         signature = await signMessage(address, nonce)
       } catch (err) {
-        // User rejected the prompt or wallet error
         if (err.message?.toLowerCase().includes('reject') || err.message?.toLowerCase().includes('denied') || err.code === 4001) {
           throw new Error('Signature request was rejected. Please approve the sign-in prompt in MetaMask.')
         }
@@ -245,10 +249,35 @@ export default function AppProvider({ children }) {
     return () => clearInterval(interval)
   }, [isWalletConnected, loadUnreadCount])
 
-  // Wallet-shaped object for backward compatibility with existing pages
+  /**
+   * setUserUsername — called by UsernameSetupModal's onComplete prop after the
+   * backend PATCH /api/users/me succeeds.
+   *
+   * We patch only the `username` field on the local user object so the rest
+   * of the auth state (token, walletAddress, etc.) is untouched and the app
+   * continues to function without a full re-authentication round-trip.
+   *
+   * @param {string} username - The confirmed username returned by the modal.
+   */
+  const setUserUsername = useCallback((username) => {
+    setUser((prev) => (prev ? { ...prev, username } : prev))
+  }, [])
+
+  /**
+   * needsUsername — true when the user is authenticated but has not yet
+   * chosen a username (i.e. user.username is null or an empty string).
+   *
+   * AuthGuard reads this flag to decide whether to render the
+   * UsernameSetupModal over the dashboard.
+   */
+  const needsUsername = isWalletConnected && !!user && !user.username
+
+  // Wallet-shaped object for backward compatibility with existing pages.
+  // displayName priority: username > shortened wallet address > 'Not connected'
+  // Username is now the human-friendly, unique identity visible to other users.
   const wallet = {
     address: walletAddress,
-    displayName: user?.display_name || shortenAddress(walletAddress) || 'Not connected',
+    displayName: user?.username || shortenAddress(walletAddress) || 'Not connected',
     email: user?.email || '',
     network: 'Arc Testnet',
     balance: 0, // balance comes from blockchain, not backend
@@ -264,6 +293,9 @@ export default function AppProvider({ children }) {
     authLoading,
     connectWallet,
     disconnectWallet,
+    // Username setup — consumed by AuthGuard and UsernameSetupModal
+    needsUsername,     // boolean: true when authenticated but username is null
+    setUserUsername,   // (username: string) => void — patches local user state
     jobs,
     jobsLoading,
     jobsError,
@@ -287,7 +319,6 @@ export default function AppProvider({ children }) {
     demoWallets: [],
     switchWallet: () => { },
     resetDemo: () => { },
-    fundJob: updateJob, // local state update after blockchain confirms
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>
