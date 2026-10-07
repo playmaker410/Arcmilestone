@@ -282,28 +282,6 @@ func (h *JobHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	utils.WriteJSON(w, http.StatusOK, job)
 }
 
-// Delete handles DELETE /api/jobs/{id} (protected).
-func (h *JobHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	userID, ok := middleware.UserIDFromContext(r.Context())
-	if !ok {
-		utils.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
-		return
-	}
-
-	jobID, err := parseUint64Param(r, "id")
-	if err != nil {
-		utils.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid job id"})
-		return
-	}
-
-	if err := h.svc.Delete(r.Context(), jobID, userID); err != nil {
-		utils.WriteError(w, err)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // parseUint64Param extracts a named URL path parameter and parses it as uint64.
 func parseUint64Param(r *http.Request, name string) (uint64, error) {
 	raw := strings.TrimSpace(r.PathValue(name))

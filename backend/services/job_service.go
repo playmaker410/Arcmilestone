@@ -40,16 +40,16 @@ func NewJobService(
 type CreateJobParams struct {
 	Title               string
 	Description         string
-	RequiredSkills      []string  // will be marshalled to JSON for storage
-	Budget              string    // exact decimal string, e.g. "150.00"
+	RequiredSkills      []string // will be marshalled to JSON for storage
+	Budget              string   // exact decimal string, e.g. "150.00"
 	ApplicationDeadline *time.Time
 	DeliveryDeadline    time.Time
 }
 
 // Create validates the input, sets the initial job status to OPEN, and
 // inserts the job into the database. selected_freelancer_id is always NULL
-// on creation. Returns the newly created job.
-func (s *JobService) Create(ctx context.Context, creatorUserID uint64, params CreateJobParams) (*models.Job, error) {
+// on creation. Returns the newly created enriched job.
+func (s *JobService) Create(ctx context.Context, creatorUserID uint64, params CreateJobParams) (*models.JobDetail, error) {
 	if err := validateCreateJob(params); err != nil {
 		return nil, err
 	}
@@ -73,12 +73,12 @@ func (s *JobService) Create(ctx context.Context, creatorUserID uint64, params Cr
 		return nil, fmt.Errorf("create job: %w", err)
 	}
 
-	return s.jobs.FindByID(ctx, jobID)
+	return s.jobs.FindDetailByID(ctx, jobID)
 }
 
-// GetByID returns a single job. Returns apperr.ErrNotFound if absent.
-func (s *JobService) GetByID(ctx context.Context, id uint64) (*models.Job, error) {
-	job, err := s.jobs.FindByID(ctx, id)
+// GetByID returns a single enriched job. Returns apperr.ErrNotFound if absent.
+func (s *JobService) GetByID(ctx context.Context, id uint64) (*models.JobDetail, error) {
+	job, err := s.jobs.FindDetailByID(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, apperr.ErrNotFound
 	}
@@ -88,14 +88,14 @@ func (s *JobService) GetByID(ctx context.Context, id uint64) (*models.Job, error
 	return job, nil
 }
 
-// ListOpen returns all jobs with status OPEN.
-func (s *JobService) ListOpen(ctx context.Context) ([]*models.Job, error) {
-	return s.jobs.ListOpen(ctx)
+// ListOpen returns all enriched jobs with status OPEN.
+func (s *JobService) ListOpen(ctx context.Context) ([]*models.JobDetail, error) {
+	return s.jobs.ListOpenDetail(ctx)
 }
 
-// ListByCreator returns all jobs posted by the given user.
-func (s *JobService) ListByCreator(ctx context.Context, userID uint64) ([]*models.Job, error) {
-	return s.jobs.ListByCreator(ctx, userID)
+// ListByCreator returns all enriched jobs posted by the given user.
+func (s *JobService) ListByCreator(ctx context.Context, userID uint64) ([]*models.JobDetail, error) {
+	return s.jobs.ListByCreatorDetail(ctx, userID)
 }
 
 // Publish transitions a job from OPEN to REVIEWING_APPLICATIONS.
@@ -106,17 +106,20 @@ func (s *JobService) ListByCreator(ctx context.Context, userID uint64) ([]*model
 // Current lifecycle: jobs are created directly as OPEN (no draft step).
 // If a draft-first flow is introduced later this method will enforce
 // the OPEN transition.
-func (s *JobService) Publish(ctx context.Context, jobID, callerUserID uint64) (*models.Job, error) {
-	job, err := s.GetByID(ctx, jobID)
+func (s *JobService) Publish(ctx context.Context, jobID, callerUserID uint64) (*models.JobDetail, error) {
+	job, err := s.jobs.FindByID(ctx, jobID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, apperr.ErrNotFound
+		}
 		return nil, err
 	}
 	if job.CreatorUserID != callerUserID {
 		return nil, apperr.ErrForbidden
 	}
 	// Jobs start as OPEN; there is no draft step in the current DB schema.
-	// Return the job as-is so the frontend's create→publish two-step still works.
-	return job, nil
+	// Return the enriched job so the frontend's create→publish two-step still works.
+	return s.jobs.FindDetailByID(ctx, jobID)
 }
 
 // UpdateJobParams holds the fields the creator may change after posting.
@@ -132,9 +135,12 @@ type UpdateJobParams struct {
 // Update edits the mutable metadata on a job. Only the creator may do this,
 // and only while the job is still OPEN or REVIEWING_APPLICATIONS.
 // Budget is unconditionally excluded from updates.
-func (s *JobService) Update(ctx context.Context, jobID, callerUserID uint64, params UpdateJobParams) (*models.Job, error) {
-	job, err := s.GetByID(ctx, jobID)
+func (s *JobService) Update(ctx context.Context, jobID, callerUserID uint64, params UpdateJobParams) (*models.JobDetail, error) {
+	job, err := s.jobs.FindByID(ctx, jobID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, apperr.ErrNotFound
+		}
 		return nil, err
 	}
 	if job.CreatorUserID != callerUserID {
@@ -193,14 +199,17 @@ func (s *JobService) Update(ctx context.Context, jobID, callerUserID uint64, par
 		return nil, fmt.Errorf("update job: %w", err)
 	}
 
-	return s.jobs.FindByID(ctx, jobID)
+	return s.jobs.FindDetailByID(ctx, jobID)
 }
 
 // Cancel transitions a job to CANCELLED. Only the creator may cancel.
 // Only OPEN or REVIEWING_APPLICATIONS jobs may be cancelled.
-func (s *JobService) Cancel(ctx context.Context, jobID, callerUserID uint64) (*models.Job, error) {
-	job, err := s.GetByID(ctx, jobID)
+func (s *JobService) Cancel(ctx context.Context, jobID, callerUserID uint64) (*models.JobDetail, error) {
+	job, err := s.jobs.FindByID(ctx, jobID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, apperr.ErrNotFound
+		}
 		return nil, err
 	}
 	if job.CreatorUserID != callerUserID {
@@ -218,7 +227,7 @@ func (s *JobService) Cancel(ctx context.Context, jobID, callerUserID uint64) (*m
 	if err := s.jobs.UpdateStatus(ctx, jobID, models.JobStatusCancelled); err != nil {
 		return nil, err
 	}
-	return s.jobs.FindByID(ctx, jobID)
+	return s.jobs.FindDetailByID(ctx, jobID)
 }
 
 // ===========================================================================
@@ -275,19 +284,6 @@ func validateCreateJob(p CreateJobParams) error {
 // obviously over-budget submissions before the user hits submit, but
 // the backend does not have a blockchain client in the current codebase
 // so on-chain balance verification is not performed here.
-// Delete removes the job entirely if it belongs to the creator.
-func (s *JobService) Delete(ctx context.Context, jobID, userID uint64) error {
-	job, err := s.jobs.FindByID(ctx, jobID)
-	if err != nil {
-		return err
-	}
-	if job.CreatorUserID != userID {
-		return apperr.ErrForbidden
-	}
-
-	return s.jobs.Delete(ctx, jobID)
-}
-
 func validateBudget(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {

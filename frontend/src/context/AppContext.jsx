@@ -315,10 +315,6 @@ export default function AppProvider({ children }) {
     loadNotifications,
     loadUnreadCount,
     markNotificationRead,
-    // Kept for pages that still reference it — remove after full migration
-    demoWallets: [],
-    switchWallet: () => { },
-    resetDemo: () => { },
   }
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

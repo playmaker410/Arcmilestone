@@ -120,15 +120,17 @@ CREATE TABLE IF NOT EXISTS jobs (
 -- Records users who apply for jobs.
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS job_applications (
+CREATE TABLE IF NOT EXISTS applications (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 
     job_id BIGINT UNSIGNED NOT NULL,
-    freelancer_id BIGINT UNSIGNED NOT NULL,
+    applicant_user_id BIGINT UNSIGNED NOT NULL,
 
     cover_letter TEXT NULL,
+    estimated_days INT UNSIGNED NOT NULL,
+    portfolio_url TEXT NULL,
 
-    status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
 
     created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
@@ -136,11 +138,11 @@ CREATE TABLE IF NOT EXISTS job_applications (
 
     PRIMARY KEY (id),
 
-    UNIQUE KEY uq_job_applications_job_freelancer
-        (job_id, freelancer_id),
+    UNIQUE KEY uq_job_applications_job_applicant
+        (job_id, applicant_user_id),
 
     KEY idx_job_applications_job (job_id),
-    KEY idx_job_applications_freelancer (freelancer_id),
+    KEY idx_job_applications_applicant (applicant_user_id),
     KEY idx_job_applications_status (status),
 
     CONSTRAINT fk_job_applications_job
@@ -149,8 +151,8 @@ CREATE TABLE IF NOT EXISTS job_applications (
         ON DELETE CASCADE
         ON UPDATE RESTRICT,
 
-    CONSTRAINT fk_job_applications_freelancer
-        FOREIGN KEY (freelancer_id)
+    CONSTRAINT fk_job_applications_applicant
+        FOREIGN KEY (applicant_user_id)
         REFERENCES users (id)
         ON DELETE RESTRICT
         ON UPDATE RESTRICT

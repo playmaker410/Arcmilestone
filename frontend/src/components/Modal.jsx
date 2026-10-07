@@ -3,12 +3,17 @@ import { useEffect, useRef } from 'react'
 
 export default function Modal({ open, onClose, title, description, children, actions }) {
   const dialogRef = useRef(null)
+  const onCloseRef = useRef(onClose)
+
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
 
   useEffect(() => {
     if (!open) return undefined
     const previousFocus = document.activeElement
     const handleKeyDown = (event) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape') onCloseRef.current()
       if (event.key === 'Tab' && dialogRef.current) {
         const focusable = [...dialogRef.current.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')]
         if (!focusable.length) return
@@ -26,7 +31,7 @@ export default function Modal({ open, onClose, title, description, children, act
       document.removeEventListener('keydown', handleKeyDown)
       previousFocus?.focus?.()
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
 

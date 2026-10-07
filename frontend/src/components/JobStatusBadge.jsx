@@ -10,8 +10,8 @@ const statusStyles = {
   completed: { icon: CheckCircle2, label: 'Completed', className: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
   cancelled: { icon: XCircle, label: 'Cancelled', className: 'bg-slate-100 text-slate-700 ring-slate-200' },
   // Backend snake_case (escrow_status)
-  awaiting_freelancer: { icon: CircleDollarSign, label: 'Awaiting Freelancer', className: 'bg-amber-50 text-amber-700 ring-amber-200' },
-  funded: { icon: CircleDollarSign, label: 'Funded', className: 'bg-cyan-50 text-cyan-700 ring-cyan-200' },
+  awaiting_freelancer: { icon: CircleDollarSign, label: 'Funded', className: 'bg-cyan-50 text-cyan-700 ring-cyan-200' },
+  funded: { icon: CheckCircle2, label: 'Assigned', className: 'bg-amber-50 text-amber-700 ring-amber-200' },
   work_submitted: { icon: Send, label: 'Work Submitted', className: 'bg-amber-50 text-amber-700 ring-amber-200' },
   refunded: { icon: RotateCcw, label: 'Refunded', className: 'bg-violet-50 text-violet-700 ring-violet-200' },
   // Backend snake_case (application status)
@@ -24,9 +24,9 @@ const statusStyles = {
   Draft: { icon: FilePlus2, label: 'Draft', className: 'bg-slate-100 text-slate-700 ring-slate-200' },
   Open: { icon: Clock3, label: 'Open', className: 'bg-cyan-50 text-cyan-700 ring-cyan-200' },
   'Reviewing Applications': { icon: Clock3, label: 'Reviewing Applications', className: 'bg-amber-50 text-amber-700 ring-amber-200' },
-  'Awaiting Freelancer': { icon: CircleDollarSign, label: 'Awaiting Freelancer', className: 'bg-amber-50 text-amber-700 ring-amber-200' },
+  'Awaiting Freelancer': { icon: CircleDollarSign, label: 'Funded', className: 'bg-cyan-50 text-cyan-700 ring-cyan-200' },
   'In Progress': { icon: Clock3, label: 'In Progress', className: 'bg-cyan-50 text-cyan-700 ring-cyan-200' },
-  Funded: { icon: CircleDollarSign, label: 'Funded', className: 'bg-cyan-50 text-cyan-700 ring-cyan-200' },
+  Funded: { icon: CheckCircle2, label: 'Assigned', className: 'bg-amber-50 text-amber-700 ring-amber-200' },
   'Work Submitted': { icon: Send, label: 'Work Submitted', className: 'bg-amber-50 text-amber-700 ring-amber-200' },
   Completed: { icon: CheckCircle2, label: 'Completed', className: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
   Refunded: { icon: RotateCcw, label: 'Refunded', className: 'bg-violet-50 text-violet-700 ring-violet-200' },
@@ -38,7 +38,8 @@ const statusStyles = {
 }
 
 export default function JobStatusBadge({ status, compact = false }) {
-  const config = statusStyles[status] || { icon: Clock3, label: status || 'Unknown', className: 'bg-slate-100 text-slate-700 ring-slate-200' }
+  const normalizedStatus = typeof status === 'string' ? status.toLowerCase() : status
+  const config = statusStyles[normalizedStatus] || statusStyles[status] || { icon: Clock3, label: status || 'Unknown', className: 'bg-slate-100 text-slate-700 ring-slate-200' }
   const Icon = config.icon
 
   return (

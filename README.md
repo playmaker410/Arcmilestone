@@ -1,6 +1,6 @@
 # ArcMilestone
 
-A blockchain escrow platform built on Arc Testnet. Users create fixed-payment jobs, apply to other users' jobs, and send or receive payments through a smart contract. Each user's role — client or freelancer — is determined by their relationship to a specific job, not permanently assigned to their account.
+A blockchain escrow platform built on Arc Testnet. Users create fixed-payment jobs, apply to other users' jobs, and send or receive payments through a smart contract. A user's role — client or freelancer — is determined by their relationship to a specific job, not permanently assigned to their account.
 
 ---
 
@@ -11,25 +11,31 @@ User connects wallet (MetaMask)
         ↓
 Signs a nonce to prove wallet ownership
         ↓
-Creates a job with a fixed USDC payment
+Creates a job with a fixed USDC payment and funds the escrow on-chain
         ↓
-Funds the escrow through the ArcMilestone smart contract
+Other users browse and apply to the job
         ↓
-Another user applies to the job
+Job creator reviews applications and selects one applicant
         ↓
-Job creator selects an applicant
+Creator confirms the freelancer on-chain (assignFreelancer)
         ↓
-Selected user performs and submits the work
+Freelancer performs and submits work
         ↓
 Job creator approves the submission
         ↓
 Smart contract releases the escrowed USDC to the freelancer
 ```
 
+Cancel path:
+
+```
+Funded job, no freelancer assigned yet → client clicks "Cancel Job" → smart contract returns USDC immediately
+```
+
 Refund path:
 
 ```
-Funded job → deadline passes without approval → client requests refund → smart contract returns USDC
+Funded job, freelancer assigned → deadline passes with no submission → client requests refund → smart contract returns USDC
 ```
 
 ---
@@ -39,8 +45,8 @@ Funded job → deadline passes without approval → client requests refund → s
 A user is not permanently a client or freelancer. The same wallet can create a job (acting as client) and apply to a different job (acting as freelancer) at the same time.
 
 ```
-Alice creates Job #1  →  Alice = client,     Bob = freelancer
-Bob creates Job #2    →  Bob   = client,     Alice = freelancer
+Alice creates Job #1  →  Alice = client,   Bob = freelancer
+Bob creates Job #2    →  Bob   = client,   Alice = freelancer
 ```
 
 The role is always determined by the relationship between a user and a specific job.
@@ -63,20 +69,35 @@ arcmilestone/
 **File:** `contracts/contracts/ArcMilestone.sol`
 **Network:** Arc Testnet
 **Chain ID:** `5042002`
-**Deployed address:** `0x8137d832836cd5B8214C07186ab97f9401db2D8D`
-**Explorer:** https://testnet.arcscan.app/address/0x8137d832836cd5B8214C07186ab97f9401db2D8D
+**Deployed address:** `0x7eB7199607b41a2fb066d345a199cedBDD7932fb`
+**Explorer:** https://testnet.arcscan.app/address/0x7eB7199607b41a2fb066d345a199cedBDD7932fb
 
 The contract is the financial authority. It is responsible for:
 
 - Receiving and locking USDC in escrow
 - Tracking the total amount currently locked (`totalLocked`)
-- Enforcing job state transitions (`Funded → WorkSubmitted → Completed` or `Funded → Refunded`)
+- Enforcing job state transitions
 - Releasing payment to the freelancer on approval
-- Refunding the client when the deadline passes without submitted work
-- Emitting events (`JobCreatedAndFunded`, `WorkSubmitted`, `PaymentReleased`, `JobRefunded`)
+- Returning funds to the client on cancellation or expired deadline
+- Emitting events (`JobCreatedAndFundedOpen`, `FreelancerAssigned`, `WorkSubmitted`, `PaymentReleased`, `JobRefunded`)
 - Reentrancy protection on all fund-moving functions
 
-The database never claims funds are escrowed solely because the frontend says so. Blockchain confirmation is required.
+### Job status lifecycle (on-chain)
+
+```
+AwaitingFreelancer → Funded → WorkSubmitted → Completed
+        ↓                ↓
+    Refunded          Refunded
+  (cancel anytime)  (deadline passed, no submission)
+```
+
+| Status | Meaning |
+|---|---|
+| `AwaitingFreelancer` | Job funded, no freelancer assigned yet |
+| `Funded` | Freelancer assigned, work not yet submitted |
+| `WorkSubmitted` | Freelancer submitted deliverable |
+| `Completed` | Client approved, payment released |
+| `Refunded` | Funds returned to client (cancel or expired) |
 
 ### Contract setup
 
@@ -87,7 +108,7 @@ npm install
 # Compile
 npx hardhat compile
 
-# Run tests (42 tests covering the full lifecycle)
+# Run tests (56 tests covering the full lifecycle)
 npx hardhat test
 ```
 
@@ -105,7 +126,10 @@ Deployment records live in `contracts/ignition/deployments/chain-5042002/` and `
 
 **Language:** Go 1.22+
 **Database:** MySQL 8.0+
-**Key dependency:** `github.com/decred/dcrd/dcrec/secp256k1` for EIP-191 signature recovery
+**Key dependencies:**
+- `github.com/decred/dcrd/dcrec/secp256k1` — EIP-191 signature recovery
+- `github.com/ethereum/go-ethereum` — blockchain RPC client
+- `github.com/go-sql-driver/mysql` — MySQL driver
 
 The backend manages all offchain application state and enforces business rules. The smart contract remains authoritative for escrow funds.
 
@@ -132,13 +156,15 @@ MySQL (arcmilestone database)
 - Jobs (marketplace metadata, status, deadlines)
 - Applications (cover letter, estimated days, status)
 - Submissions (delivery URL, notes)
+- Escrow references (blockchain job ID, funding transaction hash)
 - Notifications
-- Indexed copies of blockchain events (for display/search)
+- Indexed copies of blockchain events (for display and search)
 
 ### What MySQL does not store
 
 - Private keys, seed phrases, or wallet passwords
-- The authoritative escrow balance (that is the contract)
+- The authoritative escrow balance (that lives in the contract)
+- `proposed_amount` on applications — payment is fixed by the job
 
 ### Environment variables
 
@@ -172,8 +198,6 @@ mysql -u <user> -p -e "CREATE DATABASE arcmilestone CHARACTER SET utf8mb4 COLLAT
 mysql -u <user> -p arcmilestone < backend/database/migrations/001_initial_schema.sql
 mysql -u <user> -p arcmilestone < backend/database/migrations/002_remove_proposed_amount.sql
 ```
-
-**Important:** MySQL's session timezone must be UTC, or use `UTC_TIMESTAMP()` in queries that compare stored UTC datetimes. The migrations target the selected database — do not run them without selecting `arcmilestone` first.
 
 ### Running
 
@@ -209,10 +233,11 @@ All JSON requests require `Content-Type: application/json`. Protected routes req
 |---|---|
 | Health | `GET /api/health` |
 | Auth | `POST /api/auth/nonce`, `POST /api/auth/verify`, `GET /api/auth/me`, `POST /api/auth/logout` |
-| Users | `GET /api/users/me`, `PATCH /api/users/me` |
+| Users | `GET /api/users/me`, `PATCH /api/users/me`, `GET /api/users/check-username` |
 | Jobs | `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}`, `PATCH /api/jobs/{id}`, `POST /api/jobs/{id}/publish`, `POST /api/jobs/{id}/cancel` |
 | Applications | `POST /api/jobs/{id}/applications`, `GET /api/jobs/{id}/applications`, `POST /api/jobs/{id}/applications/{applicationId}/accept`, `POST /api/jobs/{id}/applications/{applicationId}/reject`, `GET /api/applications/me`, `POST /api/applications/{id}/withdraw` |
 | Submissions | `POST /api/jobs/{id}/submission`, `GET /api/jobs/{id}/submission` |
+| Escrow | `POST /api/jobs/{id}/escrow`, `GET /api/jobs/{id}/escrow` |
 | Notifications | `GET /api/notifications`, `GET /api/notifications/unread`, `PATCH /api/notifications/{id}/read` |
 
 ### Authentication
@@ -220,29 +245,31 @@ All JSON requests require `Content-Type: application/json`. Protected routes req
 The backend uses **EIP-191 `personal_sign` wallet authentication** — no passwords, no private key storage.
 
 1. Client calls `POST /api/auth/nonce` with the wallet address.
-2. Backend generates a random 32-byte nonce, stores its **SHA-256 hash**, returns the plaintext. The nonce expires after 10 minutes.
+2. Backend generates a random 32-byte nonce, stores its **SHA-256 hash**, returns the plaintext. Expires after 10 minutes.
 3. Client passes the plaintext nonce to MetaMask, which signs it and returns a 65-byte signature.
 4. Client calls `POST /api/auth/verify` with the address, plaintext nonce, and signature.
-5. Backend verifies the hash matches a valid unused nonce, recovers the signer address from the EIP-191 signature using secp256k1, and checks it matches the claimed address.
+5. Backend verifies the hash matches a valid unused nonce, recovers the signer from the EIP-191 signature using secp256k1, and checks it matches the claimed address.
 6. Nonce is marked used (prevents replay). A session token is issued.
 7. Session token format: `base64url(payload) + "." + base64url(HMAC-SHA512(payload, AUTH_SECRET))`. Expires after 24 hours.
 
-### Job status lifecycle
+### Job status lifecycle (offchain)
 
 ```
 draft → open → reviewing_applications → awaiting_funding → in_progress → completed
                                                                         ↘ cancelled
 ```
 
-`escrow_status` is a separate nullable field (`funded | work_submitted | completed | refunded`) that mirrors onchain state via the blockchain event indexer. The contract is always the authority.
+`escrow_status` is a separate nullable field (`awaiting_freelancer | funded | work_submitted | completed | refunded`) that mirrors on-chain state. The contract is always the authority.
 
 ---
 
 ## Frontend
 
-**Framework:** React 19 + Vite
+**Framework:** React 19 + Vite 8
 **Wallet library:** viem v2
+**Routing:** React Router v7
 **Styling:** Tailwind CSS v4
+**Icons:** Lucide React
 
 ### Environment variables
 
@@ -268,15 +295,28 @@ Opens at `http://localhost:5173`.
 
 ```
 src/
-├── context/AppContext.jsx   — global auth, jobs, applications, notifications state
+├── context/AppContext.jsx        — global auth, jobs, applications, notifications state
 ├── services/
-│   ├── api.js               — all backend HTTP calls
-│   └── blockchain.js        — viem wallet + contract interactions
-├── pages/                   — one file per route
-├── components/              — shared UI components
+│   ├── api.js                    — all backend HTTP calls
+│   └── blockchain.js             — viem wallet + contract interactions
+├── pages/                        — one file per route
+│   ├── Home.jsx
+│   ├── CreateJob.jsx
+│   ├── Jobs.jsx
+│   ├── ExploreJobs.jsx
+│   ├── JobDetails.jsx
+│   ├── ReviewApplications.jsx
+│   ├── MyApplications.jsx
+│   ├── Overview.jsx
+│   ├── Notifications.jsx
+│   ├── Settings.jsx
+│   ├── Transactions.jsx
+│   └── Help.jsx
+├── components/                   — shared UI components
 └── utils/
-    ├── permissions.js       — resource-level authorization helpers
-    └── format.js            — date, USDC, address formatting
+    ├── permissions.js            — resource-level authorization helpers
+    ├── format.js                 — date, USDC, address formatting
+    └── pollJob.js                — polls backend until escrow status updates
 ```
 
 ### Authorization model
@@ -284,12 +324,15 @@ src/
 Authorization is always resource-based, not role-based. `permissions.js` checks a user's relationship to each specific job:
 
 ```js
-isJobCreator(job, walletAddress)          // job.creator_wallet === walletAddress
-isSelectedFreelancer(job, walletAddress)  // job.selected_freelancer_wallet === walletAddress
+isJobCreator(job, walletAddress)              // job.creator_wallet === walletAddress
+isSelectedFreelancer(job, walletAddress)      // job.selected_freelancer_wallet === walletAddress
 canApply(job, walletAddress, applications)
-canFundEscrow(job, walletAddress)
+canFundJob(job, walletAddress)
+canAssignOnChain(job, walletAddress)
 canSubmitWork(job, walletAddress)
 canApproveWork(job, walletAddress)
+canClaimRefund(job, walletAddress)            // deadline passed, status funded
+canCancelUnassignedJob(job, walletAddress)    // anytime, status awaiting_freelancer
 ```
 
 There are no permanent `client` or `freelancer` roles on the user object.
@@ -319,7 +362,7 @@ cd contracts && npm install && npx hardhat compile
 # 3. Backend
 cd ../backend
 cp .env.example .env
-# Fill in DB_USER, DB_PASSWORD, AUTH_SECRET, ARC_CONTRACT_ADDRESS
+# Fill in DB_USER, DB_PASSWORD, AUTH_SECRET, ARC_CONTRACT_ADDRESS, ARC_RPC_URL
 sudo systemctl start mysql
 mysql -u <user> -p -e "CREATE DATABASE arcmilestone CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -u <user> -p arcmilestone < database/migrations/001_initial_schema.sql
@@ -359,7 +402,7 @@ Open `http://localhost:5173`, click **Connect Wallet**, approve the MetaMask sig
 ## Remaining Work
 
 1. **Blockchain event listener** — `services/arc_listener.go` is a stub. Needs to poll or subscribe to Arc contract logs, decode events, and update `escrow_status` on jobs.
-2. **Submission update endpoint** — `SubmissionRepository.Update` exists but no HTTP endpoint exposes it for recording `deliverable_hash` and `submission_transaction_hash` after onchain confirmation.
+2. **Submission update endpoint** — `SubmissionRepository.Update` exists but no HTTP endpoint exposes it for recording `deliverable_hash` and `submission_transaction_hash` after on-chain confirmation.
 3. **Pagination** — all list endpoints return all rows.
 4. **Token revocation** — logout is client-side only; no server-side blocklist.
 5. **Rate limiting** — no rate limiting on public endpoints.
@@ -378,12 +421,12 @@ gofmt -l .
 
 # Frontend
 cd frontend
-npx tsc --noEmit   # type-check (if tsconfig present)
+npm run build
 
 # Smart contract
 cd contracts
 npx hardhat compile
-npx hardhat test
+npx hardhat test   # 56 tests
 ```
 
 ---

@@ -46,7 +46,7 @@ func (r *JobEscrowRepository) Create(ctx context.Context, params CreateJobEscrow
 			amount,
 			funding_transaction_hash,
 			status
-		) VALUES (?, ?, ?, ?, ?, ?, 'funded')`,
+		) VALUES (?, ?, ?, ?, ?, ?, 'awaiting_freelancer')`,
 		params.JobID,
 		params.ChainID,
 		params.ContractAddress,
@@ -107,4 +107,68 @@ func (r *JobEscrowRepository) FindByJobID(ctx context.Context, jobID uint64) (*m
 		return nil, fmt.Errorf("find job escrow by job ID: %w", err)
 	}
 	return e, nil
+}
+
+// FindByBlockchainID returns the escrow record for a given blockchain job ID on a specific chain and contract.
+// Returns a wrapped sql.ErrNoRows when no row exists.
+func (r *JobEscrowRepository) FindByBlockchainID(ctx context.Context, chainID uint64, contractAddress string, blockchainJobID string) (*models.JobEscrow, error) {
+	e := new(models.JobEscrow)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			job_id,
+			chain_id,
+			contract_address,
+			blockchain_job_id,
+			amount,
+			funding_transaction_hash,
+			status,
+			created_at,
+			updated_at
+		FROM job_escrows
+		WHERE chain_id = ? AND contract_address = ? AND blockchain_job_id = ?`,
+		chainID,
+		contractAddress,
+		blockchainJobID,
+	).Scan(
+		&e.ID,
+		&e.JobID,
+		&e.ChainID,
+		&e.ContractAddress,
+		&e.BlockchainJobID,
+		&e.Amount,
+		&e.FundingTransactionHash,
+		&e.Status,
+		&e.CreatedAt,
+		&e.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find job escrow by blockchain ID: %w", err)
+	}
+	return e, nil
+}
+
+// UpdateStatus updates the status of an existing job escrow.
+func (r *JobEscrowRepository) UpdateStatus(ctx context.Context, jobID uint64, status string) error {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE job_escrows
+		SET status = ?, updated_at = NOW()
+		WHERE job_id = ?`,
+		status,
+		jobID,
+	)
+	if err != nil {
+		return fmt.Errorf("update job escrow status: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update job escrow status: %w", err)
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }

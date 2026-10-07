@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 
+	"arcmilestone/models"
 	"arcmilestone/repositories"
 )
 
@@ -71,8 +72,11 @@ func (l *ArcListener) Start(ctx context.Context) {
 		log.Printf("arc_listener: initial header fetch failed: %v", err)
 	}
 
-	eventSig := []byte("JobCreatedAndFundedOpen(uint256,address,uint256,uint256,bytes32)")
-	topic0 := crypto.Keccak256Hash(eventSig)
+	topicJobCreated := crypto.Keccak256Hash([]byte("JobCreatedAndFundedOpen(uint256,address,uint256,uint256,bytes32)"))
+	topicAssigned := crypto.Keccak256Hash([]byte("FreelancerAssigned(uint256,address,address)"))
+	topicSubmitted := crypto.Keccak256Hash([]byte("WorkSubmitted(uint256,address,bytes32)"))
+	topicReleased := crypto.Keccak256Hash([]byte("PaymentReleased(uint256,address,uint256)"))
+	topicRefunded := crypto.Keccak256Hash([]byte("JobRefunded(uint256,address,uint256)"))
 
 	for {
 		select {
@@ -91,7 +95,6 @@ func (l *ArcListener) Start(ctx context.Context) {
 			}
 
 			// Do not query more than 100 blocks at once to avoid RPC limits.
-			// Advance in chunks to ensure no blocks are skipped.
 			fromBlock := lastBlock + 1
 			toBlock := latestBlock
 			if toBlock-fromBlock > 100 {
@@ -102,7 +105,13 @@ func (l *ArcListener) Start(ctx context.Context) {
 				FromBlock: new(big.Int).SetUint64(fromBlock),
 				ToBlock:   new(big.Int).SetUint64(toBlock),
 				Addresses: []common.Address{l.contract},
-				Topics:    [][]common.Hash{{topic0}},
+				Topics: [][]common.Hash{{
+					topicJobCreated,
+					topicAssigned,
+					topicSubmitted,
+					topicReleased,
+					topicRefunded,
+				}},
 			}
 
 			logs, err := l.client.FilterLogs(ctx, query)
@@ -112,7 +121,21 @@ func (l *ArcListener) Start(ctx context.Context) {
 			}
 
 			for _, vLog := range logs {
-				l.processJobCreatedLog(ctx, vLog)
+				if len(vLog.Topics) == 0 {
+					continue
+				}
+				switch vLog.Topics[0] {
+				case topicJobCreated:
+					l.processJobCreatedLog(ctx, vLog)
+				case topicAssigned:
+					l.processFreelancerAssignedLog(ctx, vLog)
+				case topicSubmitted:
+					l.processWorkSubmittedLog(ctx, vLog)
+				case topicReleased:
+					l.processPaymentReleasedLog(ctx, vLog)
+				case topicRefunded:
+					l.processJobRefundedLog(ctx, vLog)
+				}
 			}
 			lastBlock = toBlock
 		}
@@ -125,7 +148,10 @@ func (l *ArcListener) processJobCreatedLog(ctx context.Context, vLog types.Log) 
 	}
 
 	blockchainJobID := new(big.Int).SetBytes(vLog.Topics[1][:]).String()
-	amount := new(big.Int).SetBytes(vLog.Data[0:32]).String()
+	amountWei := new(big.Int).SetBytes(vLog.Data[0:32])
+	amountFloat := new(big.Float).SetPrec(256).SetInt(amountWei)
+	amountFloat = amountFloat.Quo(amountFloat, big.NewFloat(1e18))
+	amount := amountFloat.Text('f', 18)
 	metadataHash := common.BytesToHash(vLog.Data[64:96])
 
 	// Find the matching DB job by hashing IDs of unfunded jobs
@@ -171,4 +197,55 @@ func (l *ArcListener) processJobCreatedLog(ctx context.Context, vLog types.Log) 
 	} else {
 		log.Printf("arc_listener: created escrow for job %d, tx %s", matchedJobID, vLog.TxHash.Hex())
 	}
+}
+
+func (l *ArcListener) getJobByBlockchainID(ctx context.Context, vLog types.Log) (*models.JobEscrow, error) {
+	if len(vLog.Topics) < 2 {
+		return nil, fmt.Errorf("missing jobId topic")
+	}
+	blockchainJobID := new(big.Int).SetBytes(vLog.Topics[1][:]).String()
+	return l.escrowRepo.FindByBlockchainID(ctx, l.chainID, l.contract.Hex(), blockchainJobID)
+}
+
+func (l *ArcListener) processFreelancerAssignedLog(ctx context.Context, vLog types.Log) {
+	escrow, err := l.getJobByBlockchainID(ctx, vLog)
+	if err != nil {
+		log.Printf("arc_listener: processFreelancerAssignedLog: %v", err)
+		return
+	}
+	_ = l.escrowRepo.UpdateStatus(ctx, escrow.JobID, "funded")
+	_ = l.jobRepo.UpdateStatus(ctx, escrow.JobID, models.JobStatusInProgress)
+	log.Printf("arc_listener: updated job %d to funded/in_progress", escrow.JobID)
+}
+
+func (l *ArcListener) processWorkSubmittedLog(ctx context.Context, vLog types.Log) {
+	escrow, err := l.getJobByBlockchainID(ctx, vLog)
+	if err != nil {
+		log.Printf("arc_listener: processWorkSubmittedLog: %v", err)
+		return
+	}
+	_ = l.escrowRepo.UpdateStatus(ctx, escrow.JobID, "work_submitted")
+	log.Printf("arc_listener: updated job %d to work_submitted", escrow.JobID)
+}
+
+func (l *ArcListener) processPaymentReleasedLog(ctx context.Context, vLog types.Log) {
+	escrow, err := l.getJobByBlockchainID(ctx, vLog)
+	if err != nil {
+		log.Printf("arc_listener: processPaymentReleasedLog: %v", err)
+		return
+	}
+	_ = l.escrowRepo.UpdateStatus(ctx, escrow.JobID, "completed")
+	_ = l.jobRepo.UpdateStatus(ctx, escrow.JobID, models.JobStatusCompleted)
+	log.Printf("arc_listener: updated job %d to completed", escrow.JobID)
+}
+
+func (l *ArcListener) processJobRefundedLog(ctx context.Context, vLog types.Log) {
+	escrow, err := l.getJobByBlockchainID(ctx, vLog)
+	if err != nil {
+		log.Printf("arc_listener: processJobRefundedLog: %v", err)
+		return
+	}
+	_ = l.escrowRepo.UpdateStatus(ctx, escrow.JobID, "refunded")
+	_ = l.jobRepo.UpdateStatus(ctx, escrow.JobID, models.JobStatusCancelled)
+	log.Printf("arc_listener: updated job %d to refunded/cancelled", escrow.JobID)
 }

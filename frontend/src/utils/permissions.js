@@ -4,11 +4,11 @@ export const sameAddress = (first, second) =>
 // Support both backend snake_case and legacy camelCase field names
 const getCreatorWallet = (job) => job?.creator_wallet || job?.creatorWallet
 const getSelectedFreelancerWallet = (job) => job?.selected_freelancer_wallet || job?.selectedFreelancerWallet
-const getMarketplaceStatus = (job) => {
+export const getMarketplaceStatus = (job) => {
   const s = job?.marketplace_status || job?.marketplaceStatus || job?.status || ''
   return s.toLowerCase()
 }
-const getEscrowStatus = (job) => {
+export const getEscrowStatus = (job) => {
   const s = job?.escrow_status || job?.escrowStatus || ''
   return s ? s.toLowerCase() : null
 }
@@ -74,7 +74,20 @@ export const canClaimRefund = (job, walletAddress) => {
   const deadline = getDeliveryDeadline(job)
   return isJobCreator(job, walletAddress) &&
     getEscrowStatus(job) === 'funded' &&
+    getMarketplaceStatus(job) !== 'cancelled' &&
     Boolean(deadline) && new Date(deadline) < new Date()
 }
 
+// Client can cancel and reclaim escrow any time before a freelancer is assigned.
+// No deadline check — only requires AwaitingFreelancer escrow status.
+export const canCancelUnassignedJob = (job, walletAddress) =>
+  isJobCreator(job, walletAddress) &&
+  getEscrowStatus(job) === 'awaiting_freelancer' &&
+  getMarketplaceStatus(job) !== 'cancelled'
+
 // Frontend checks improve the interface only; the smart contract must enforce all financial permissions.
+
+export const canCancelUnfundedJob = (job, walletAddress) =>
+  isJobCreator(job, walletAddress) &&
+  getEscrowStatus(job) === null &&
+  (getMarketplaceStatus(job) === 'open' || getMarketplaceStatus(job) === 'reviewing_applications')

@@ -40,3 +40,26 @@ type Job struct {
 	CreatedAt           time.Time       `json:"created_at"`
 	UpdatedAt           time.Time       `json:"updated_at"`
 }
+
+// JobDetail is the enriched response returned by API endpoints.
+// It embeds Job and adds wallet addresses (from the users table) and
+// escrow fields (from the job_escrows table) so the frontend can perform
+// permission checks and display blockchain state without extra round-trips.
+//
+// Fields sourced from joined tables use pointers so they marshal as null
+// when the row does not exist (e.g. no freelancer selected yet, no escrow
+// recorded yet).
+type JobDetail struct {
+	Job
+
+	// From users JOIN on creator_user_id
+	CreatorWallet string `json:"creator_wallet"`
+
+	// From users JOIN on selected_freelancer_id (null when no freelancer yet)
+	SelectedFreelancerWallet *string `json:"selected_freelancer_wallet"`
+
+	// From job_escrows LEFT JOIN (null when escrow not yet recorded)
+	EscrowStatus           *string `json:"escrow_status"`
+	BlockchainJobID        *string `json:"blockchain_job_id"`
+	FundingTransactionHash *string `json:"funding_transaction_hash"`
+}

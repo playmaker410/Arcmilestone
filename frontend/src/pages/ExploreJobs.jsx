@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import EmptyState from '../components/EmptyState'
 import PageHeader from '../components/PageHeader'
 import useApp from '../hooks/useApp'
-import { hasApplicationDeadlinePassed } from '../utils/permissions'
+import { getMarketplaceStatus, hasApplicationDeadlinePassed, hasApplied, isJobCreator } from '../utils/permissions'
 import { formatDate, formatUSDC } from '../utils/format'
 
 const ranges = [
@@ -23,7 +23,11 @@ function getSkills(job) {
 }
 
 export default function ExploreJobs() {
-  const { jobs, jobsLoading, loadOpenJobs } = useApp()
+  const { jobs, applications, wallet, walletAddress, jobsLoading, loadOpenJobs, loadApplications } = useApp()
+  const addr = walletAddress || wallet?.address
+  
+  // Need to load applications so we know what they've applied to
+  useEffect(() => { loadApplications() }, [loadApplications])
   const [query, setQuery] = useState('')
   const [range, setRange] = useState('all')
   const [skill, setSkill] = useState('all')
@@ -32,8 +36,14 @@ export default function ExploreJobs() {
 
   // Backend returns only open jobs from GET /api/jobs — filter defensively
   const openJobs = useMemo(() => jobs.filter((job) => {
-    const marketplaceStatus = (job.marketplace_status || job.marketplaceStatus || job.status || '').toLowerCase()
-    if (marketplaceStatus !== 'open' || hasApplicationDeadlinePassed(job)) return false
+    // 1. Must not have applied already
+    if (hasApplied(job, addr, applications)) return false
+    // 2. Must not be the creator
+    if (isJobCreator(job, addr)) return false
+    // 3. Must be open or reviewing
+    const marketplaceStatus = getMarketplaceStatus(job)
+    if ((marketplaceStatus !== 'open' && marketplaceStatus !== 'reviewing_applications') || hasApplicationDeadlinePassed(job)) return false
+    
     const skills = getSkills(job)
     const amount = Number(job.budget)
     const matchesQuery = `${job.title} ${skills.join(' ')}`.toLowerCase().includes(query.toLowerCase())
@@ -44,7 +54,7 @@ export default function ExploreJobs() {
       (range === '100-250' && amount >= 100 && amount <= 250) ||
       (range === 'over-250' && amount > 250)
     return matchesQuery && matchesSkill && matchesRange
-  }), [jobs, query, range, skill])
+  }), [jobs, applications, addr, query, range, skill])
 
   const allSkills = useMemo(() =>
     [...new Set(jobs.flatMap(getSkills))].sort(),

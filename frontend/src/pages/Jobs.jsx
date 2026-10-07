@@ -5,7 +5,7 @@ import EmptyState from '../components/EmptyState'
 import JobCard from '../components/JobCard'
 import PageHeader from '../components/PageHeader'
 import useApp from '../hooks/useApp'
-import { isJobCreator, isSelectedFreelancer } from '../utils/permissions'
+import { getEscrowStatus, getMarketplaceStatus, isJobCreator, isSelectedFreelancer } from '../utils/permissions'
 
 const postedStatuses = ['All', 'work_submitted', 'refunded', 'completed', 'cancelled']
 const postedStatusLabels = {
@@ -18,12 +18,10 @@ const workingStatusLabels = {
 }
 
 const actionForJob = (job, tab) => {
-  const ms = (job.marketplace_status || job.marketplaceStatus || '').toLowerCase()
-  const es = (job.escrow_status || job.escrowStatus || '').toLowerCase()
+  const ms = getMarketplaceStatus(job)
+  const es = getEscrowStatus(job)
   if (tab === 'posted') {
     return ({
-      open: 'View Applications',
-      reviewing_applications: 'Review Applications',
       in_progress: es === 'work_submitted' ? 'Review Submission' : 'View Progress',
       completed: 'View Payment', cancelled: 'View Details', draft: 'View Details',
     })[ms] || 'View Details'
@@ -35,12 +33,12 @@ const actionForJob = (job, tab) => {
 }
 
 export default function Jobs() {
-  const { jobs, applications, walletAddress, wallet, loadJobs, loadApplications, jobsLoading } = useApp()
+  const { jobs, applications, walletAddress, wallet, loadJobs, loadApplications, jobsLoading, refreshJob } = useApp()
   const [tab, setTab] = useState('posted')
   const [status, setStatus] = useState('All')
   const [query, setQuery] = useState('')
 
-  const addr = walletAddress || wallet.address
+  const addr = walletAddress || wallet?.address
 
   // Load posted jobs on mount and when switching to posted tab
   useEffect(() => {
@@ -52,48 +50,42 @@ export default function Jobs() {
     }
   }, [tab, loadJobs, loadApplications])
 
+  // Fetch missing jobs for accepted applications
+  useEffect(() => {
+    if (tab === 'working') {
+      const missingJobIds = applications
+        .filter((app) => app.status === 'accepted')
+        .map((app) => app.job_id || app.jobId)
+        .filter((id) => !jobs.some((j) => String(j.id) === String(id)))
+
+      missingJobIds.forEach((id) => {
+        refreshJob(id)
+      })
+    }
+  }, [tab, applications, jobs, refreshJob])
+
   const statuses = tab === 'posted' ? postedStatuses : workingStatuses
   const statusLabels = tab === 'posted' ? postedStatusLabels : workingStatusLabels
 
   const filteredJobs = useMemo(() => {
     if (tab === 'posted') {
       return jobs.filter((job) => {
-        const ms = (job.marketplace_status || job.marketplaceStatus || '').toLowerCase()
-        return isJobCreator(job, addr) &&
-          (status === 'All' || ms === status) &&
+        const ms = getMarketplaceStatus(job)
+        return isJobCreator(job, addr) && (status === 'All' || ms === status) &&
           `${job.title} ${job.id}`.toLowerCase().includes(query.toLowerCase())
       })
     }
-    // "working" tab — filter jobs where user is selected freelancer
+    // "working" tab
     return jobs.filter((job) => {
-      const es = (job.escrow_status || job.escrowStatus || '').toLowerCase()
-      const ms = (job.marketplace_status || job.marketplaceStatus || '').toLowerCase()
-      const isWorking = isSelectedFreelancer(job, addr)
+      const es = getEscrowStatus(job)
+      const ms = getMarketplaceStatus(job)
       const visibleStatus = es || ms
-      return isWorking &&
-        (status === 'All' || visibleStatus === status) &&
+      return isSelectedFreelancer(job, addr) && (status === 'All' || visibleStatus === status) &&
         `${job.title} ${job.id}`.toLowerCase().includes(query.toLowerCase())
     })
   }, [jobs, query, status, tab, addr])
 
-  // For working tab, also derive working jobs from accepted applications
-  const workingFromApplications = useMemo(() => {
-    if (tab !== 'working') return []
-    return applications
-      .filter((app) => app.status === 'accepted')
-      .map((app) => {
-        const jobId = app.job_id || app.jobId
-        return jobs.find((j) => String(j.id) === String(jobId))
-      })
-      .filter(Boolean)
-      .filter((job) => !filteredJobs.some((j) => String(j.id) === String(job.id)))
-  }, [tab, applications, jobs, filteredJobs])
-
-  const allWorkingJobs = tab === 'working'
-    ? [...filteredJobs, ...workingFromApplications]
-    : filteredJobs
-
-  const displayJobs = tab === 'posted' ? filteredJobs : allWorkingJobs
+  const displayJobs = filteredJobs
 
   const changeTab = (next) => { setTab(next); setStatus('All') }
 
@@ -160,11 +152,7 @@ export default function Jobs() {
               key={job.id}
               job={job}
               actionLabel={actionForJob(job, tab)}
-              actionTo={
-                tab === 'posted' && ['open', 'reviewing_applications'].includes((job.marketplace_status || job.marketplaceStatus || '').toLowerCase())
-                  ? `/jobs/${job.id}/applications`
-                  : undefined
-              }
+              actionTo={undefined}
             />
           ))}
         </div>

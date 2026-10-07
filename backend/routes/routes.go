@@ -61,7 +61,6 @@ func New(
 	mux.Handle("GET /api/jobs", optAuth(http.HandlerFunc(jobHandler.List)))
 	mux.HandleFunc("GET /api/jobs/{id}", jobHandler.GetByID)
 	mux.Handle("PATCH /api/jobs/{id}", auth(http.HandlerFunc(jobHandler.Patch)))
-	mux.Handle("DELETE /api/jobs/{id}", auth(http.HandlerFunc(jobHandler.Delete)))
 	mux.Handle("POST /api/jobs/{id}/publish", auth(http.HandlerFunc(jobHandler.Publish)))
 	mux.Handle("POST /api/jobs/{id}/cancel", auth(http.HandlerFunc(jobHandler.Cancel)))
 

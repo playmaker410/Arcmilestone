@@ -1,11 +1,12 @@
 import { ArrowUpRight, CalendarDays } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { formatDate, formatUSDC } from '../utils/format'
+import { getEscrowStatus, getMarketplaceStatus } from '../utils/permissions'
 import JobStatusBadge from './JobStatusBadge'
 
 export default function JobCard({ job, actionLabel = 'View details', actionTo }) {
-  const marketplaceStatus = job.marketplace_status || job.marketplaceStatus
-  const escrowStatus = job.escrow_status || job.escrowStatus
+  const marketplaceStatus = getMarketplaceStatus(job)
+  const escrowStatus = getEscrowStatus(job)
   const deliveryDeadline = job.delivery_deadline || job.deliveryDeadline
 
   return (

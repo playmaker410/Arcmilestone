@@ -114,15 +114,19 @@ export default function CreateJob() {
         return
       }
 
-      // Step 4: poll until escrow_status appears.
-      setFormAlert('Funding submitted. Waiting for blockchain confirmation...')
+      // Step 4: wait for the backend listener to index the escrow
+      setFormAlert('Funding successful. Finalizing job...')
+      
       let finalJob = job
       try {
-        finalJob = await pollJobForEscrowStatus(job.id, 'any')
-      } catch {
-        // Non-fatal: tell the user it's just delayed
-        alert('Your payment was successful, but the blockchain is taking longer than usual to confirm. The job status will update shortly.')
-        finalJob = { ...job, blockchain_job_id: onChainResult.blockchainJobId }
+        // Simple polling to wait for backend to catch up (max 10s)
+        for (let i = 0; i < 5; i++) {
+          await new Promise(r => setTimeout(r, 2000))
+          finalJob = await api.getJob(job.id)
+          if (finalJob.escrow_status) break
+        }
+      } catch (err) {
+        console.error("Polling error:", err)
       }
 
       addJob(finalJob)

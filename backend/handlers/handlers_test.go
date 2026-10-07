@@ -223,7 +223,7 @@ func TestCORSMiddleware_SetsHeaders(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5174" {
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
 		t.Errorf("Access-Control-Allow-Origin = %q, want 'http://localhost:5173'", got)
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Methods"); got == "" {

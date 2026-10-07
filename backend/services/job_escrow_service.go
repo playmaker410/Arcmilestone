@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"arcmilestone/apperr"
@@ -79,7 +80,7 @@ func (s *JobEscrowService) RecordEscrow(
 	_, err = s.escrows.Create(ctx, repositories.CreateJobEscrowParams{
 		JobID:                  jobID,
 		ChainID:                5042002, // Arc Testnet chain ID
-		ContractAddress:        "", // set from env if needed; omitted for now
+		ContractAddress:        os.Getenv("ARC_CONTRACT_ADDRESS"), // Fixed: Read from env
 		BlockchainJobID:        strings.TrimSpace(params.BlockchainJobID),
 		Amount:                 job.Budget,
 		FundingTransactionHash: strings.TrimSpace(params.FundingTransactionHash),

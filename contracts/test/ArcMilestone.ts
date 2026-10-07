@@ -564,6 +564,96 @@ describe("ArcMilestone", async function () {
   });
 
   // =====================================================
+  // CANCEL UNASSIGNED JOB (CLIENT CANCELS BEFORE ASSIGNMENT)
+  // =====================================================
+
+  describe("cancelUnassignedJob", function () {
+    it("returns the exact escrow amount to the client", async function () {
+      const { client, escrow } = await createOpenJob();
+
+      await viem.assertions.balancesHaveChanged(
+        escrow.write.cancelUnassignedJob([1n], { account: client.account }),
+        [
+          { address: escrow.address, amount: -PAYMENT },
+          { address: client.account.address, amount: PAYMENT },
+        ],
+      );
+    });
+
+    it("marks the job as Refunded", async function () {
+      const { client, escrow } = await createOpenJob();
+      await escrow.write.cancelUnassignedJob([1n], { account: client.account });
+
+      assert.equal((await escrow.read.getJob([1n])).status, STATUS_REFUNDED);
+    });
+
+    it("decreases totalLocked to zero", async function () {
+      const { client, escrow } = await createOpenJob();
+      await escrow.write.cancelUnassignedJob([1n], { account: client.account });
+
+      assert.equal(await escrow.read.totalLocked(), 0n);
+      assert.equal(
+        await publicClient.getBalance({ address: escrow.address }),
+        0n,
+      );
+    });
+
+    it("emits JobRefunded", async function () {
+      const { client, escrow } = await createOpenJob();
+
+      await viem.assertions.emitWithArgs(
+        escrow.write.cancelUnassignedJob([1n], { account: client.account }),
+        escrow,
+        "JobRefunded",
+        [1n, client.account.address, PAYMENT],
+      );
+    });
+
+    it("rejects cancellation by a stranger", async function () {
+      const { stranger, escrow } = await createOpenJob();
+
+      await viem.assertions.revertWithCustomErrorWithArgs(
+        escrow.write.cancelUnassignedJob([1n], { account: stranger.account }),
+        escrow,
+        "CallerIsNotClient",
+        [1n, stranger.account.address],
+      );
+    });
+
+    it("rejects cancellation once a freelancer is assigned (Funded status)", async function () {
+      const { client, escrow } = await createAssignedJob();
+
+      await viem.assertions.revertWithCustomErrorWithArgs(
+        escrow.write.cancelUnassignedJob([1n], { account: client.account }),
+        escrow,
+        "WrongJobStatus",
+        [1n, STATUS_FUNDED, STATUS_AWAITING_FREELANCER],
+      );
+    });
+
+    it("rejects a second cancellation on the same job", async function () {
+      const { client, escrow } = await createOpenJob();
+      await escrow.write.cancelUnassignedJob([1n], { account: client.account });
+
+      await viem.assertions.revertWithCustomErrorWithArgs(
+        escrow.write.cancelUnassignedJob([1n], { account: client.account }),
+        escrow,
+        "WrongJobStatus",
+        [1n, STATUS_REFUNDED, STATUS_AWAITING_FREELANCER],
+      );
+    });
+
+    it("can cancel before deadline — no deadline check", async function () {
+      // Job is freshly created, far from its deadline — should succeed immediately.
+      const { client, escrow } = await createOpenJob();
+
+      // No time advance — deadline has not passed. Cancel should still work.
+      await escrow.write.cancelUnassignedJob([1n], { account: client.account });
+      assert.equal((await escrow.read.getJob([1n])).status, STATUS_REFUNDED);
+    });
+  });
+
+  // =====================================================
   // READS, DIRECT TRANSFERS, AND MULTIPLE JOBS
   // =====================================================
 

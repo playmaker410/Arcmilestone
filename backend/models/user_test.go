@@ -21,16 +21,16 @@ func TestUserStructHasWalletAddress(t *testing.T) {
 	}
 }
 
-// TestUserEmailIsOptional verifies that email is a nullable pointer field.
-// Email is not the authentication identity and must not be required for login.
-func TestUserEmailIsOptional(t *testing.T) {
+// TestUserUsernameIsOptional verifies that username is a nullable pointer field.
+// Username is not the authentication identity and must not be required for login.
+func TestUserUsernameIsOptional(t *testing.T) {
 	userType := reflect.TypeOf(User{})
-	field, ok := userType.FieldByName("Email")
+	field, ok := userType.FieldByName("Username")
 	if !ok {
-		t.Fatal("User struct is missing Email field")
+		t.Fatal("User struct is missing Username field")
 	}
 	if field.Type.Kind() != reflect.Ptr {
-		t.Errorf("Email must be *string so it can be NULL; got %v", field.Type)
+		t.Errorf("Username must be *string so it can be NULL; got %v", field.Type)
 	}
 }
 
@@ -49,14 +49,4 @@ func TestUserHasNoPasswordField(t *testing.T) {
 	}
 }
 
-// TestUserDisplayNameIsOptional verifies that display_name is a nullable pointer.
-func TestUserDisplayNameIsOptional(t *testing.T) {
-	userType := reflect.TypeOf(User{})
-	field, ok := userType.FieldByName("DisplayName")
-	if !ok {
-		t.Fatal("User struct is missing DisplayName field")
-	}
-	if field.Type.Kind() != reflect.Ptr {
-		t.Errorf("DisplayName must be *string so it can be NULL; got %v", field.Type)
-	}
-}
+

@@ -8,9 +8,9 @@ import Modal from '../components/Modal'
 import WalletBadge from '../components/WalletBadge'
 import useApp from '../hooks/useApp'
 import { api } from '../services/api'
-import { approveAndReleasePayment, budgetToWei, formatUnits, fundOpenJobOnChain, assignFreelancerOnChain, getWalletBalance, refundExpiredJobOnChain, submitWorkOnChain } from '../services/blockchain'
+import { approveAndReleasePayment, budgetToWei, formatUnits, fundOpenJobOnChain, assignFreelancerOnChain, cancelUnassignedJobOnChain, getWalletBalance, refundExpiredJobOnChain, submitWorkOnChain } from '../services/blockchain'
 import { formatDate, formatUSDC, shortenAddress } from '../utils/format'
-import { canApply, canApproveWork, canClaimRefund, canFundJob, canAssignOnChain, canReviewApplications, canSubmitWork, getWalletApplication, hasApplicationDeadlinePassed, isJobCreator } from '../utils/permissions'
+import { canApply, canApproveWork, canCancelUnassignedJob, canClaimRefund, canFundJob, canAssignOnChain, canReviewApplications, canSubmitWork, getWalletApplication, hasApplicationDeadlinePassed, isJobCreator, getMarketplaceStatus } from '../utils/permissions'
 import { pollJobForEscrowStatus } from '../utils/pollJob'
 
 const emptyApplication = { coverLetter: '', estimatedDays: '', portfolioUrl: '' }
@@ -38,6 +38,8 @@ export default function JobDetails() {
   const [applicationErrors, setApplicationErrors] = useState({})
   const [submissionForm, setSubmissionForm] = useState({ url: '', notes: '' })
   const [submissionErrors, setSubmissionErrors] = useState({})
+  const [editForm, setEditForm] = useState({ title: '', description: '', skills: '', applicationDeadline: '', deliveryDeadline: '' })
+  const [editErrors, setEditErrors] = useState({})
   const [modal, setModal] = useState(null)
   const [processing, setProcessing] = useState(false)
   const [notice, setNotice] = useState(null)
@@ -63,7 +65,7 @@ export default function JobDetails() {
   useEffect(() => {
     if (!job) return
     const es = (job.escrow_status || '').toLowerCase()
-    const ms = (job.marketplace_status || '').toLowerCase()
+    const ms = getMarketplaceStatus(job)
     if (es === 'work_submitted' || es === 'completed' || ms === 'in_progress') {
       api.getSubmission(job.id).then(setSubmission).catch(() => { })
     }
@@ -73,7 +75,7 @@ export default function JobDetails() {
   if (jobNotFound) return <Navigate to="/404" replace />
   if (!job) return <Navigate to="/404" replace />
 
-  const marketplaceStatus = (job.marketplace_status || job.marketplaceStatus || job.status || '').toLowerCase()
+  const marketplaceStatus = getMarketplaceStatus(job)
   const escrowStatus = (job.escrow_status || job.escrowStatus || '').toLowerCase() || null
   const freelancerWallet = job.selected_freelancer_wallet || job.selectedFreelancerWallet
   const blockchainJobId = job.blockchain_job_id || job.blockchainJobId
@@ -92,6 +94,8 @@ export default function JobDetails() {
   const maySubmit = canSubmitWork(job, addr)
   const mayApprove = canApproveWork(job, addr)
   const mayRefund = canClaimRefund(job, addr)
+  const mayCancel = canCancelUnassignedJob(job, addr)
+  const mayEdit = creator && (marketplaceStatus === 'open' || marketplaceStatus === 'reviewing_applications')
   const expired = hasApplicationDeadlinePassed(job)
 
   const escrowAmount = job.budget
@@ -119,6 +123,50 @@ export default function JobDetails() {
       setNotice({ variant: 'success', title: 'Application submitted', message: 'Your application has been sent to the client.' })
     } catch (err) {
       setApplicationErrors({ form: err.message || 'Failed to submit application.' })
+    } finally {
+      setProcessing(false)
+    }
+  }
+
+  const handleEditClick = () => {
+    setEditForm({
+      title: job.title,
+      description: job.description,
+      skills: skills.join(', '),
+      applicationDeadline: applicationDeadline ? applicationDeadline.slice(0, 10) : '',
+      deliveryDeadline: deliveryDeadline ? deliveryDeadline.slice(0, 10) : ''
+    })
+    setEditErrors({})
+    setModal('edit')
+  }
+
+  const handleEditSubmit = async (event) => {
+    event.preventDefault()
+    const next = {}
+    if (editForm.title.trim().length < 4) next.title = 'Enter a clear title with at least 4 characters.'
+    if (editForm.description.trim().length < 30) next.description = 'Describe the scope in at least 30 characters.'
+    if (!editForm.skills.trim()) next.skills = 'Add at least one required skill.'
+    if (!editForm.applicationDeadline) next.applicationDeadline = 'Required.'
+    if (!editForm.deliveryDeadline) next.deliveryDeadline = 'Required.'
+    setEditErrors(next)
+    if (Object.keys(next).length) return
+
+    setProcessing(true)
+    try {
+      const body = {
+        title: editForm.title.trim(),
+        description: editForm.description.trim(),
+        required_skills: editForm.skills.split(',').map((s) => s.trim()).filter(Boolean),
+        application_deadline: new Date(`${editForm.applicationDeadline}T23:59:59Z`).toISOString(),
+        delivery_deadline: new Date(`${editForm.deliveryDeadline}T23:59:59Z`).toISOString(),
+      }
+      const updatedJob = await api.updateJob(job.id, body)
+      setJob(updatedJob)
+      refreshJob(job.id)
+      setModal(null)
+      setNotice({ variant: 'success', title: 'Job updated', message: 'Job details have been saved.' })
+    } catch (err) {
+      setNotice({ variant: 'error', title: 'Update failed', message: err.message || 'Failed to update job' })
     } finally {
       setProcessing(false)
     }
@@ -153,16 +201,23 @@ export default function JobDetails() {
         return
       }
 
-      await fundOpenJobOnChain({
+      const onChainResult = await fundOpenJobOnChain({
         deliveryDeadlineISO: deliveryDeadline,
         metadataHashInput: String(job.id),
         budgetString: escrowAmount,
         clientAddress: addr,
       })
-      setModal(null)
-      setNotice({ variant: 'info', title: 'Transaction sent', message: 'Waiting for blockchain confirmation...' })
       
-      const updatedJob = await pollJobForEscrowStatus(job.id, 'any')
+      // Wait for backend to index
+      for (let i = 0; i < 5; i++) {
+        await new Promise(r => setTimeout(r, 2000))
+        const check = await api.getJob(job.id)
+        if (check.escrow_status) break
+      }
+
+      setModal(null)
+      
+      const updatedJob = await api.getJob(job.id)
       setJob(updatedJob)
       refreshJob(job.id)
       
@@ -265,14 +320,35 @@ export default function JobDetails() {
         throw new Error('No on-chain job ID. Escrow must be funded on blockchain before refund.')
       }
       await refundExpiredJobOnChain({ blockchainJobId, clientAddress: addr })
+      await api.cancelJob(job.id)
       setModal(null)
-      setNotice({ variant: 'info', title: 'Transaction sent', message: 'Waiting for blockchain confirmation...' })
-      const updatedJob = await pollJobForEscrowStatus(job.id, 'refunded')
+      const updatedJob = await api.getJob(job.id)
       setJob(updatedJob)
       refreshJob(job.id)
       setNotice({ variant: 'success', title: 'Refund confirmed', message: 'The escrow has been refunded to your wallet.' })
     } catch (err) {
       setNotice({ variant: 'error', title: 'Refund failed', message: err.message })
+      setModal(null)
+    } finally {
+      setProcessing(false)
+    }
+  }
+
+  const confirmCancel = async () => {
+    setProcessing(true)
+    try {
+      if (!blockchainJobId) {
+        throw new Error('No on-chain job ID. Escrow must be funded on blockchain before cancelling.')
+      }
+      await cancelUnassignedJobOnChain({ blockchainJobId, clientAddress: addr })
+      await api.cancelJob(job.id)
+      setModal(null)
+      const updatedJob = await api.getJob(job.id)
+      setJob(updatedJob)
+      refreshJob(job.id)
+      setNotice({ variant: 'success', title: 'Job cancelled', message: 'The escrow has been returned to your wallet.' })
+    } catch (err) {
+      setNotice({ variant: 'error', title: 'Cancellation failed', message: err.message })
       setModal(null)
     } finally {
       setProcessing(false)
@@ -294,7 +370,7 @@ export default function JobDetails() {
           <h1 className="mt-3 font-display text-2xl font-bold tracking-tight text-ink-950 sm:text-3xl">{job.title}</h1>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">{job.description}</p>
         </div>
-        <JobStatusBadge status={job.marketplace_status || job.marketplaceStatus} />
+        <JobStatusBadge status={marketplaceStatus} />
       </header>
 
       {notice && (
@@ -376,6 +452,16 @@ export default function JobDetails() {
             </section>
           )}
 
+          {mayCancel && (
+            <section className="card border-red-200 p-5 sm:p-6">
+              <h2 className="font-display text-lg font-bold text-ink-950">Cancel this job</h2>
+              <p className="mt-2 text-sm leading-6 text-slate-600">No freelancer has been assigned yet. You can close this job and reclaim your escrowed funds at any time.</p>
+              <button type="button" onClick={() => setModal('cancel')} className="btn-secondary mt-4 border-red-300 text-red-700 hover:bg-red-50">
+                <RotateCcw className="size-4" />Cancel Job &amp; Reclaim Funds
+              </button>
+            </section>
+          )}
+
           {walletApplication && !creator && (
             <section className="card p-5 sm:p-6">
               <div className="flex items-center justify-between gap-3">
@@ -450,7 +536,10 @@ export default function JobDetails() {
                 <button type="button" onClick={() => setModal('apply')} className="btn-dark mt-5 w-full">Apply for Job</button>
               </>
             ) : creator ? (
-              <Link to={`/jobs/${job.id}/applications`} className="btn-dark mt-4 w-full">Review Applications</Link>
+              <>
+                <Link to={`/jobs/${job.id}/applications`} className="btn-dark mt-4 w-full">Review Applications</Link>
+                {mayEdit && <button type="button" onClick={handleEditClick} className="btn-secondary mt-3 w-full">Edit Job</button>}
+              </>
             ) : expired && !walletApplication ? (
               <Alert variant="warning" title="Applications closed">The application deadline has passed.</Alert>
             ) : (
@@ -519,6 +608,35 @@ export default function JobDetails() {
             <button type="button" onClick={() => setModal(null)} className="btn-secondary">Cancel</button>
             <button type="submit" disabled={processing} className="btn-dark">
               {processing ? <><LoaderCircle className="size-4 animate-spin" />Submitting…</> : 'Submit Application'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Edit Job modal */}
+      <Modal open={modal === 'edit'} onClose={() => !processing && setModal(null)} title="Edit Job" description="Update the details of your job posting.">
+        <form onSubmit={handleEditSubmit} noValidate className="space-y-4">
+          <FormField label="Job title" htmlFor="editTitle" required error={editErrors.title}>
+            {({ describedBy }) => <input id="editTitle" value={editForm.title} onChange={(e) => setEditForm((c) => ({ ...c, title: e.target.value }))} className={`field-input ${editErrors.title ? 'field-input-error' : ''}`} aria-describedby={describedBy} aria-invalid={Boolean(editErrors.title)} />}
+          </FormField>
+          <FormField label="Job description" htmlFor="editDescription" required error={editErrors.description}>
+            {({ describedBy }) => <textarea id="editDescription" rows={5} value={editForm.description} onChange={(e) => setEditForm((c) => ({ ...c, description: e.target.value }))} className={`field-input ${editErrors.description ? 'field-input-error' : ''}`} aria-describedby={describedBy} aria-invalid={Boolean(editErrors.description)} />}
+          </FormField>
+          <FormField label="Required skills" htmlFor="editSkills" required error={editErrors.skills}>
+            {({ describedBy }) => <input id="editSkills" value={editForm.skills} onChange={(e) => setEditForm((c) => ({ ...c, skills: e.target.value }))} className={`field-input ${editErrors.skills ? 'field-input-error' : ''}`} placeholder="Comma separated" aria-describedby={describedBy} aria-invalid={Boolean(editErrors.skills)} />}
+          </FormField>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <FormField label="Application deadline" htmlFor="editAppDeadline" required error={editErrors.applicationDeadline}>
+              {({ describedBy }) => <input id="editAppDeadline" type="date" value={editForm.applicationDeadline} onChange={(e) => setEditForm((c) => ({ ...c, applicationDeadline: e.target.value }))} className={`field-input ${editErrors.applicationDeadline ? 'field-input-error' : ''}`} aria-describedby={describedBy} aria-invalid={Boolean(editErrors.applicationDeadline)} />}
+            </FormField>
+            <FormField label="Delivery deadline" htmlFor="editDelDeadline" required error={editErrors.deliveryDeadline}>
+              {({ describedBy }) => <input id="editDelDeadline" type="date" value={editForm.deliveryDeadline} onChange={(e) => setEditForm((c) => ({ ...c, deliveryDeadline: e.target.value }))} className={`field-input ${editErrors.deliveryDeadline ? 'field-input-error' : ''}`} aria-describedby={describedBy} aria-invalid={Boolean(editErrors.deliveryDeadline)} />}
+            </FormField>
+          </div>
+          <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
+            <button type="button" onClick={() => setModal(null)} className="btn-secondary">Cancel</button>
+            <button type="submit" disabled={processing} className="btn-dark">
+              {processing ? <><LoaderCircle className="size-4 animate-spin" />Saving…</> : 'Save Changes'}
             </button>
           </div>
         </form>
@@ -594,6 +712,20 @@ export default function JobDetails() {
           </button>
         </>
       } />
+
+      {/* Cancel unassigned job modal */}
+      <Modal open={modal === 'cancel'} onClose={() => !processing && setModal(null)} title="Cancel this job?" description={`This will close the job and return ${formatUSDC(escrowAmount)} to your wallet.`} actions={
+        <>
+          <button type="button" onClick={() => setModal(null)} disabled={processing} className="btn-secondary">Go Back</button>
+          <button type="button" onClick={confirmCancel} disabled={processing} className="btn-dark bg-red-600 hover:bg-red-700">
+            {processing ? <><LoaderCircle className="size-4 animate-spin" />Processing…</> : 'Confirm Cancellation'}
+          </button>
+        </>
+      }>
+        <Alert variant="warning">
+          <span className="inline-flex gap-2"><ShieldAlert className="size-4 shrink-0" />This is an on-chain transaction. Once confirmed, the job will be permanently closed and cannot be reopened.</span>
+        </Alert>
+      </Modal>
     </>
   )
 }

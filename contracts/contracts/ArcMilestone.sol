@@ -380,6 +380,37 @@ contract ArcMilestone {
   }
 
   // =====================================================
+  // SECTION 11A: CANCEL AN UNASSIGNED JOB (ANY TIME)
+  // =====================================================
+
+  /// @notice Lets the client cancel a job and reclaim the escrow at any time,
+  ///         as long as no freelancer has been assigned yet.
+  ///         Once a freelancer is assigned (status moves to Funded), only the
+  ///         deadline-based refundExpiredJob path is available.
+  function cancelUnassignedJob(
+    uint256 jobId
+  ) external jobExists(jobId) onlyJobClient(jobId) nonReentrant {
+    Job storage job = _jobs[jobId];
+
+    if (job.status != JobStatus.AwaitingFreelancer) {
+      revert WrongJobStatus(jobId, job.status, JobStatus.AwaitingFreelancer);
+    }
+
+    uint256 amount = job.amount;
+    address client = job.client;
+
+    job.status = JobStatus.Refunded;
+    totalLocked -= amount;
+
+    (bool success, ) = payable(client).call{value: amount}("");
+    if (!success) {
+      revert PaymentTransferFailed(jobId, client, amount);
+    }
+
+    emit JobRefunded(jobId, client, amount);
+  }
+
+  // =====================================================
   // SECTION 11: REFUND AN EXPIRED JOB
   // =====================================================
 

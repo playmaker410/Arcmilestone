@@ -93,6 +93,7 @@ export const api = {
   getSubmission: (jobId) => request(`/api/jobs/${jobId}/submission`),
 
   getEscrow: (jobId) => request(`/api/jobs/${jobId}/escrow`),
+  recordEscrow: (jobId, body) => request(`/api/jobs/${jobId}/escrow`, { method: 'POST', body: JSON.stringify(body) }),
 
   // Notifications
   getNotifications: () => request('/api/notifications'),

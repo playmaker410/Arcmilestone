@@ -61,6 +61,15 @@ const ARC_MILESTONE_ABI = [
     outputs: [],
   },
   {
+    // Cancel an unassigned job at any time and reclaim the escrow.
+    // Only works while the job is still in AwaitingFreelancer status.
+    name: 'cancelUnassignedJob',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'jobId', type: 'uint256' }],
+    outputs: [],
+  },
+  {
     name: 'getJob',
     type: 'function',
     stateMutability: 'view',
@@ -228,6 +237,27 @@ export async function approveAndReleasePayment({ blockchainJobId, clientAddress 
     address: CONTRACT_ADDRESS,
     abi: ARC_MILESTONE_ABI,
     functionName: 'approveAndRelease',
+    args: [jobIdBigInt],
+    account: clientAddress,
+  })
+
+  const receipt = await publicClient.waitForTransactionReceipt({ hash })
+  return { transactionHash: hash, receipt }
+}
+
+// cancelUnassignedJob: client cancels a job that has no freelancer yet, reclaims escrow immediately
+export async function cancelUnassignedJobOnChain({ blockchainJobId, clientAddress }) {
+  if (!CONTRACT_ADDRESS) throw new Error('Contract address not configured.')
+
+  const walletClient = getWalletClient()
+  const publicClient = getPublicClient()
+
+  const jobIdBigInt = BigInt(blockchainJobId)
+
+  const hash = await walletClient.writeContract({
+    address: CONTRACT_ADDRESS,
+    abi: ARC_MILESTONE_ABI,
+    functionName: 'cancelUnassignedJob',
     args: [jobIdBigInt],
     account: clientAddress,
   })

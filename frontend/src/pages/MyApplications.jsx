@@ -1,4 +1,4 @@
-import { FileUser } from 'lucide-react'
+import { FileUser, RotateCcw } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import EmptyState from '../components/EmptyState'
@@ -16,6 +16,19 @@ export default function MyApplications() {
   const { applications, applicationsLoading, loadApplications } = useApp()
   const [status, setStatus] = useState('All')
   const [jobCache, setJobCache] = useState({})
+  const [processingId, setProcessingId] = useState(null)
+  
+  const handleWithdraw = async (appId) => {
+    setProcessingId(appId)
+    try {
+      await api.withdrawApplication(appId)
+      loadApplications() // refresh list
+    } catch (err) {
+      alert('Failed to withdraw application: ' + err.message)
+    } finally {
+      setProcessingId(null)
+    }
+  }
 
   // Load applications on mount
   useEffect(() => { loadApplications() }, [loadApplications])
@@ -91,7 +104,15 @@ export default function MyApplications() {
                     <dd className="mt-1 font-bold">{formatDate(application.created_at || application.createdAt)}</dd>
                   </div>
                 </dl>
-                <Link to={`/jobs/${jobId}`} className="btn-secondary mt-5 w-full">View Job</Link>
+                <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+                  <Link to={`/jobs/${jobId}`} className="btn-secondary flex-1">View Job</Link>
+                  {(application.status === 'pending' || application.status === 'PENDING') && (
+                    <button type="button" onClick={() => handleWithdraw(application.id)} disabled={processingId === application.id} className="btn-secondary flex-1 text-slate-500 hover:text-slate-900">
+                      <RotateCcw className={`size-4 ${processingId === application.id ? 'animate-spin' : ''}`} />
+                      Withdraw
+                    </button>
+                  )}
+                </div>
               </article>
             )
           })}

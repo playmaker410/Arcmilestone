@@ -8,7 +8,7 @@ import StatCard from '../components/StatCard'
 import WalletBadge from '../components/WalletBadge'
 import useApp from '../hooks/useApp'
 import { formatDate, formatUSDC } from '../utils/format'
-import { isJobCreator, isSelectedFreelancer } from '../utils/permissions'
+import { isJobCreator, isSelectedFreelancer, getEscrowStatus, getMarketplaceStatus } from '../utils/permissions'
 
 export default function Overview() {
   const { user, wallet, walletAddress, isWalletConnected, connectWallet, jobs, applications, loadJobs, loadApplications } = useApp()
@@ -20,21 +20,22 @@ export default function Overview() {
     }
   }, [isWalletConnected, loadJobs, loadApplications])
 
-  const addr = walletAddress || wallet.address
-
-  const posted = jobs.filter((job) => isJobCreator(job, addr))
-  const working = jobs.filter((job) => isSelectedFreelancer(job, addr))
+  // loadJobs(true) fetches ?mine=true — all jobs in the list were created by this user.
+  // For working jobs we use accepted applications to find jobs we're assigned to.
+  const addr = walletAddress || wallet?.address
+  
+  const posted = jobs  // all come from ?mine=true, no wallet check needed
+  const working = applications
+    .filter((app) => app.status === 'accepted')
+    .map((app) => {
+      const jobId = app.job_id || app.jobId
+      return jobs.find((j) => String(j.id) === String(jobId))
+    })
+    .filter(Boolean)
   const myApplications = applications
   const received = applications.filter((app) => posted.some((job) => String(job.id) === String(app.job_id || app.jobId)))
 
-  const getEscrowStatus = (job) => {
-    const s = job?.escrow_status || job?.escrowStatus || ''
-    return s ? s.toLowerCase() : null
-  }
-  const getMarketplaceStatus = (job) => {
-    const s = job?.marketplace_status || job?.marketplaceStatus || ''
-    return s.toLowerCase()
-  }
+
 
   const locked = posted
     .filter((job) => ['funded', 'work_submitted'].includes(getEscrowStatus(job)))
@@ -116,7 +117,7 @@ export default function Overview() {
                     </p>
                   </div>
                   <div className="flex items-center justify-between gap-4">
-                    <JobStatusBadge status={job.marketplace_status || job.marketplaceStatus} compact />
+                    <JobStatusBadge status={getMarketplaceStatus(job)} compact />
                     <p className="min-w-24 text-right text-sm font-bold">{formatUSDC(job.budget)}</p>
                   </div>
                 </Link>
