@@ -69,8 +69,8 @@ arcmilestone/
 **File:** `contracts/contracts/ArcMilestone.sol`
 **Network:** Arc Testnet
 **Chain ID:** `5042002`
-**Deployed address:** `0x7eB7199607b41a2fb066d345a199cedBDD7932fb`
-**Explorer:** https://testnet.arcscan.app/address/0x7eB7199607b41a2fb066d345a199cedBDD7932fb
+**Deployed address:** `0xFdb8866dC4030099260A9E8E2E346ec4C8EEF7BC`
+**Explorer:** https://testnet.arcscan.app/address/0xFdb8866dC4030099260A9E8E2E346ec4C8EEF7BC
 
 The contract is the financial authority. It is responsible for:
 
