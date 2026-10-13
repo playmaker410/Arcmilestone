@@ -1,6 +1,6 @@
 # ArcMilestone
 
-A trustless, non-custodial freelance escrow built on the Arc Testnet. Clients post fixed-price jobs and lock payment on-chain before a single line of work is written. Freelancers apply, get selected, deliver, and get paid — all enforced by a smart contract that neither party can override.
+A trustless, non custodial freelance escrow built on the Arc Testnet. Clients post fixed-price jobs and lock payment on-chain before a single line of work is written. Freelancers apply, get selected, deliver, and get paid all enforced by a smart contract that neither party can override.
 
 This is a proof of concept. It is a complete, working product: deployed contract, a Go API with a chain event listener, and a React frontend with wallet-based auth. The goal was to see how far an EVM chain with native USDC could take a real-world application without shortcuts.
 
@@ -10,11 +10,11 @@ This is a proof of concept. It is a complete, working product: deployed contract
 
 ## The core problem this solves
 
-Traditional freelance platforms sit in the middle of every transaction. They hold funds, make arbitration decisions, and charge for the privilege. The model works until it doesn't — platform insolvency, frozen accounts, arbitrary rulings, and percentage fees that compound on every job.
+Traditional freelance platforms sit in the middle of every transaction. They hold funds, make arbitration decisions, and charge for the privilege. The model works until it doesn't platform insolvency, frozen accounts, arbitrary rulings, and percentage fees that compound on every job.
 
 ArcMilestone removes the intermediary entirely. Payment locks on-chain the moment a job is posted. The contract releases it when the client approves, and provides an automatic fallback if the client goes silent. No platform account holds funds. No admin can freeze a payout.
 
-What makes this different from typical "escrow demo" projects is that it handles the full lifecycle, not just the happy path: revisions, expired deadlines, unresponsive clients, and pre-assignment cancellations are all first-class contract paths — not afterthoughts.
+What makes this different from typical "escrow demo" projects is that it handles the full lifecycle, not just the happy path: revisions, expired deadlines, unresponsive clients, and pre-assignment cancellations are all first-class contract paths not afterthoughts.
 
 ---
 
@@ -24,18 +24,14 @@ ArcMilestone is built for two sides of the same transaction. Neither side needs 
 
 ### Clients (job posters)
 - **Crypto-native businesses and DAOs** that pay contributors in USDC and want payment enforced by code, not by a support ticket
-- **Startup founders and indie builders** hiring for short fixed-price contracts (design, development, content) who want funds locked before work begins — not released on a promise
-- **Anyone burned by a freelancer disappearing after receiving payment** — escrow removes that risk entirely since no freelancer is paid until work is delivered and approved
+- **Startup founders and indie builders** hiring for short fixed price contracts (design, development, content) who want funds locked before work begins not released on a promise
+- **Anyone burned by a freelancer disappearing after receiving payment** escrow removes that risk entirely since no freelancer is paid until work is delivered and approved
 
 ### Freelancers (job seekers)
 - **Web3 developers, designers, and writers** who are already wallet-native and prefer USDC over platform-controlled earnings
 - **Freelancers in markets with unreliable banking** where receiving international payments through traditional platforms is slow, expensive, or blocked — a wallet address is enough
-- **Anyone burned by a client who refused to pay after receiving work** — the 7-day automatic release (`claimPaymentAfterReview`) means a silent client cannot hold earned funds indefinitely
-
-### Who this is not for (yet)
-- Users without a crypto wallet or testnet USDC — a fiat onramp and WalletConnect mobile support are deferred to a production version
-- Jobs requiring subjective quality arbitration — disputes currently rely on revision rounds and deadline expiry, not a neutral third party
-
+- **Anyone burned by a client who refused to pay after receiving work** the 7-day automatic release (`claimPaymentAfterReview`) means a silent client cannot hold earned funds indefinitely
+  
 ---
 
 ## Revenue model
@@ -43,9 +39,9 @@ ArcMilestone is built for two sides of the same transaction. Neither side needs 
 ArcMilestone currently takes no fee. Every wei of the escrowed amount goes directly to the freelancer on `approveAndRelease`. The following models are planned for a production deployment:
 
 ### Primary: Protocol fee (1–2% per completed job)
-When `approveAndRelease` or `claimPaymentAfterReview` executes, the contract deducts a fixed percentage from the escrow and routes it to a treasury wallet before sending the remainder to the freelancer. The fee percentage is a hardcoded contract constant — not an admin-settable variable — so clients and freelancers can verify the exact cost before committing funds.
+When `approveAndRelease` or `claimPaymentAfterReview` executes, the contract deducts a fixed percentage from the escrow and routes it to a treasury wallet before sending the remainder to the freelancer. The fee percentage is a hardcoded contract constant not an admin-settable variable so clients and freelancers can verify the exact cost before committing funds.
 
-This is a single-function change to the deployed contract. No backend or frontend changes are required.
+This is a single function change to the deployed contract. No backend or frontend changes are required.
 
 **Revenue projection at scale:**
 
@@ -58,10 +54,10 @@ This is a single-function change to the deployed contract. No backend or fronten
 Revenue scales with volume and requires zero additional infrastructure — the contract collects fees automatically.
 
 ### Secondary: Featured job listings
-Clients pay a flat fee (in USDC) to have their job pinned at the top of the marketplace for a set duration. This is a backend and frontend change only — no contract modification needed.
+Clients pay a flat fee (in USDC) to have their job pinned at the top of the marketplace for a set duration.
 
 ### Tertiary: Verified freelancer badges
-Freelancers pay a one-time or annual fee to undergo identity or portfolio verification and display a badge on their profile. Clients can filter the marketplace by verified freelancers only. Builds platform trust and creates a recurring revenue stream independent of transaction volume.
+Freelancers pay a one time or annual fee to undergo identity or portfolio verification and display a badge on their profile. Clients can filter the marketplace by verified freelancers only. Builds platform trust and creates a recurring revenue stream independent of transaction volume.
 
 ---
 
@@ -159,7 +155,7 @@ Arc exposes USDC both as a native asset and as an ERC-20. The contract deliberat
 
 **Checks-Effects-Interactions, every time.** `approveAndRelease`, `cancelUnassignedJob`, `refundExpiredJob`, and `claimPaymentAfterReview` all write their terminal state (`Completed` or `Refunded`) and decrement `totalLocked` before the external `.call`. A re-entrant callback observes a finalised job and hits the wrong-status guard before it can trigger a second payout. The manual `_reentrancyEntered` flag adds a second layer.
 
-**Revision cannot be weaponised.** `requestRevision` is only valid from `WorkSubmitted` or `Funded`. If called, it extends the deadline to `max(current_deadline, now + 3 days)`. A client cannot request revision at the last second to let the submission window expire and then claim a refund — the freelancer always gets the full revision window from the moment of the request.
+**Revision cannot be weaponised.** `requestRevision` is only valid from `WorkSubmitted`. If called, it extends the deadline to `max(current_deadline, now + 3 days)`. A client cannot request revision at the last second to let the submission window expire and then claim a refund  the freelancer always gets the full revision window from the moment of the request.
 
 **Freelancer protection by default.** `REVIEW_PERIOD` (7 days) is a hard constant in the contract. There is no admin function to reduce it, no escape hatch that requires trusting the platform operator.
 
@@ -495,7 +491,7 @@ This is a proof of concept. The core lifecycle — fund, assign, deliver, pay �
 
 | Limitation | Notes |
 | --- | --- |
-| Testnet only | Deployed on Arc Testnet (Chain ID `5042002`). Mainnet deployment requires no structural changes — only a redeployment and environment variable update. |
+| Testnet only | Deployed on Arc Testnet (Chain ID `5042002`). Mainnet deployment requires no structural changes only a redeployment and environment variable update. |
 | No mobile experience | The frontend is desktop-first. Wallet connection on mobile requires WalletConnect integration, which is not yet implemented. |
 | No email or push notifications | Notifications are in-app only. Production would add email or push delivery for critical events (application received, work submitted, payment released). |
 | No fiat onramp | Users must already hold Arc Testnet USDC. A production version would integrate an onramp provider so clients can fund jobs directly from a bank card. |
