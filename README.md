@@ -1,120 +1,145 @@
 # ArcMilestone
 
-ArcMilestone is a decentralised escrow platform built on Arc Testnet. It lets clients post fixed-price jobs, collect applications from freelancers, and release payment through a smart contract — only after approving the submitted work. No intermediary holds the funds at any point.
+A trustless, non-custodial freelance escrow built on the Arc Testnet. Clients post fixed-price jobs and lock payment on-chain before a single line of work is written. Freelancers apply, get selected, deliver, and get paid — all enforced by a smart contract that neither party can override.
 
-The platform is a full-stack proof of concept: a deployed Solidity contract handles all on-chain escrow logic, a Go API manages off-chain state, and a React frontend connects wallets and walks both parties through the job lifecycle.
+This is a proof of concept. It is a complete, working product: deployed contract, a Go API with a chain event listener, and a React frontend with wallet-based auth. The goal was to see how far an EVM chain with native USDC could take a real-world application without shortcuts.
 
----
-
-## How It Works
-
-```
-User connects wallet (MetaMask)
-        ↓
-Signs a nonce to prove wallet ownership
-        ↓
-Creates a job with a fixed USDC payment and funds the escrow on-chain
-        ↓
-Other users browse and apply to the job
-        ↓
-Job creator reviews applications and selects one applicant
-        ↓
-Creator confirms the freelancer on-chain (assignFreelancer)
-        ↓
-Freelancer performs and submits work
-        ↓
-Job creator approves the submission
-        ↓
-Smart contract releases the escrowed USDC to the freelancer
-```
-
-Cancel path:
-
-```
-Funded job, no freelancer assigned yet → client clicks "Cancel Job" → smart contract returns USDC immediately
-```
-
-Refund path:
-
-```
-Funded job, freelancer assigned → deadline passes with no submission → client requests refund → smart contract returns USDC
-```
+> **Deployed contract:** [`0x9e16cC1DEC047DeAa798C757291Fd1f629Ad144d`](https://testnet.arcscan.app/address/0x9e16cC1DEC047DeAa798C757291Fd1f629Ad144d) on Arc Testnet (Chain ID `5042002`)
 
 ---
 
-## Key Design Principle: No Permanent Roles
+## The core problem this solves
 
-A user is not permanently a client or freelancer. The same wallet can create a job (acting as client) and apply to a different job (acting as freelancer) at the same time.
+Traditional freelance platforms sit in the middle of every transaction. They hold funds, make arbitration decisions, and charge for the privilege. The model works until it doesn't — platform insolvency, frozen accounts, arbitrary rulings, and percentage fees that compound on every job.
 
-```
-Alice creates Job #1  →  Alice = client,   Bob = freelancer
-Bob creates Job #2    →  Bob   = client,   Alice = freelancer
-```
+ArcMilestone removes the intermediary entirely. Payment locks on-chain the moment a job is posted. The contract releases it when the client approves, and provides an automatic fallback if the client goes silent. No platform account holds funds. No admin can freeze a payout.
 
-The role is always determined by the relationship between a user and a specific job.
+What makes this different from typical "escrow demo" projects is that it handles the full lifecycle, not just the happy path: revisions, expired deadlines, unresponsive clients, and pre-assignment cancellations are all first-class contract paths — not afterthoughts.
 
 ---
 
-## Repository Structure
+## How it works
+
+There are no permanent roles. The same wallet can post a job in one browser tab and apply to a different one in another. Role is always derived from a wallet's relationship to a specific job, never stored as a user attribute.
+
+**The lifecycle has two distinct phases:**
+
+**Phase 1 — Open hiring.** The client calls `createAndFundJobOpen`, locking the full payment in escrow with no freelancer address attached. The job appears on the marketplace. Freelancers browse, apply, and include a cover letter and delivery estimate. The client reviews applications off-chain, selects one, and calls `assignFreelancer` on-chain. Funds were already locked; no second transaction is needed to move money.
+
+**Phase 2 — Active engagement.** The selected freelancer does the work and calls `submitWork` with a hash of the deliverable (an IPFS CID or similar). The client reviews and either calls `approveAndRelease` — which immediately transfers the full escrow to the freelancer — or `requestRevision`, which resets the job to active and extends the deadline by a minimum of 3 days so a last-second revision request cannot manufacture a refund.
+
+If the client neither approves nor requests changes within 7 days of a submission, the freelancer can call `claimPaymentAfterReview` and collect payment without client action. A silent client cannot hold earned funds indefinitely.
+
+```
+createAndFundJobOpen ──► AwaitingFreelancer
+                                │
+                    assignFreelancer(wallet)
+                                │
+                             Funded ◄──────────── requestRevision
+                                │                       │
+                           submitWork             (deadline extended,
+                                │                  min 3 days)
+                         WorkSubmitted ──────────────────┘
+                                │
+               ┌────────────────┴────────────────┐
+               │                                 │
+        approveAndRelease            claimPaymentAfterReview
+        (client approves)            (client silent 7+ days)
+               │                                 │
+           Completed ◄───────────────────────────┘
+```
+
+**Exit paths:**
+- `cancelUnassignedJob` — client cancels before a freelancer is assigned, USDC returns immediately
+- `refundExpiredJob` — deadline passes with no submission, client reclaims the escrow
+
+---
+
+## Stack
+
+| Layer | Technology |
+|---|---|
+| Smart contract | Solidity 0.8.34 · Hardhat · Hardhat Ignition |
+| Backend | Go 1.26 · standard `net/http` · MySQL 8.0 |
+| Chain integration | `go-ethereum` ethclient (EIP-1474 log polling) |
+| Frontend | React 19 · Vite · viem v2 · Tailwind CSS v4 |
+| Auth | EIP-191 `personal_sign` · HMAC-SHA512 session tokens |
+| Testing | 56 Hardhat contract tests · `go-sqlmock` unit tests |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        React Frontend                       │
+│  viem · React Router v7 · Tailwind CSS v4 · Lucide React   │
+└────────────────────┬────────────────────────────────────────┘
+                     │  REST + Bearer token
+┌────────────────────▼────────────────────────────────────────┐
+│                        Go API (1.26)                        │
+│  handlers → services → repositories → MySQL 8.0            │
+│                     │                                       │
+│            ArcListener (background goroutine)               │
+│            polls chain every 2 s · decodes event logs      │
+└────────────────────┬────────────────────────────────────────┘
+                     │  eth_getLogs  (EIP-1474)
+┌────────────────────▼────────────────────────────────────────┐
+│              ArcMilestone.sol  ·  Arc Testnet               │
+│  Chain ID 5042002  ·  USDC is the native asset (18 dec)     │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ```
 arcmilestone/
-├── backend/          # Go API — handlers, services, repositories, auth
-├── frontend/         # React UI — wallet connection, job lifecycle, dashboard
-└── contracts/        # Solidity smart contract — Hardhat + Hardhat Ignition
+├── backend/      # Go API — handlers, services, repositories, auth, event listener
+├── frontend/     # React UI — wallet auth, job lifecycle, dashboard
+└── contracts/    # Solidity escrow — Hardhat + Hardhat Ignition, 56 tests
 ```
 
 ---
 
-## Smart Contract
+## Smart contract
 
 **File:** `contracts/contracts/ArcMilestone.sol`
-**Network:** Arc Testnet
-**Chain ID:** `5042002`
-**Deployed address:** `0x9e16cC1DEC047DeAa798C757291Fd1f629Ad144d`
-**Explorer:** https://testnet.arcscan.app/address/0x9e16cC1DEC047DeAa798C757291Fd1f629Ad144d
 
-The contract is the financial authority. It is responsible for:
+Arc exposes USDC both as a native asset and as an ERC-20. The contract deliberately uses only the native interface — `msg.value` in, `.call{value}` out. Using both interfaces on the same underlying balance is a well-known source of accounting errors; keeping one interface eliminates the ambiguity entirely.
 
-- Receiving and locking USDC in escrow
-- Tracking the total amount currently locked (`totalLocked`)
-- Enforcing job state transitions
-- Releasing payment to the freelancer on approval
-- Returning funds to the client on cancellation or expired deadline
-- Emitting events (`JobCreatedAndFundedOpen`, `FreelancerAssigned`, `WorkSubmitted`, `PaymentReleased`, `JobRefunded`)
-- Reentrancy protection on all fund-moving functions
+### Design decisions
 
-### Job status lifecycle (on-chain)
+**Funding decoupled from hiring.** `createAndFundJobOpen` takes no freelancer address. Payment locks before anyone is selected. `assignFreelancer` is a separate transaction that binds a wallet after off-chain review. Every funded job always has a full escrow — the freelancer never starts work on a promise.
 
-```
-AwaitingFreelancer → Funded → WorkSubmitted → Completed
-        ↓                ↓
-    Refunded          Refunded
-  (cancel anytime)  (deadline passed, no submission)
-```
+**Checks-Effects-Interactions, every time.** `approveAndRelease`, `cancelUnassignedJob`, `refundExpiredJob`, and `claimPaymentAfterReview` all write their terminal state (`Completed` or `Refunded`) and decrement `totalLocked` before the external `.call`. A re-entrant callback observes a finalised job and hits the wrong-status guard before it can trigger a second payout. The manual `_reentrancyEntered` flag adds a second layer.
 
-| Status | Meaning |
+**Revision cannot be weaponised.** `requestRevision` is only valid from `WorkSubmitted` or `Funded`. If called, it extends the deadline to `max(current_deadline, now + 3 days)`. A client cannot request revision at the last second to let the submission window expire and then claim a refund — the freelancer always gets the full revision window from the moment of the request.
+
+**Freelancer protection by default.** `REVIEW_PERIOD` (7 days) is a hard constant in the contract. There is no admin function to reduce it, no escape hatch that requires trusting the platform operator.
+
+**No untracked funds.** `receive()` and `fallback()` both revert with `DirectPaymentNotAllowed`. Every wei inside the contract entered through `createAndFundJobOpen` and has an associated job record. `totalLocked` is always accurate.
+
+**Custom errors carry context.** Every revert includes the `jobId`, the `caller`, and the `currentStatus`. A frontend or debugger can identify the exact failed guard without parsing revert strings.
+
+### On-chain events
+
+| Event | Indexed fields |
 |---|---|
-| `AwaitingFreelancer` | Job funded, no freelancer assigned yet |
-| `Funded` | Freelancer assigned, work not yet submitted |
-| `WorkSubmitted` | Freelancer submitted deliverable |
-| `Completed` | Client approved, payment released |
-| `Refunded` | Funds returned to client (cancel or expired) |
+| `JobCreatedAndFundedOpen` | `jobId`, `client` |
+| `FreelancerAssigned` | `jobId`, `client`, `freelancer` |
+| `WorkSubmitted` | `jobId`, `freelancer` |
+| `RevisionRequested` | `jobId`, `client` |
+| `PaymentReleased` | `jobId`, `freelancer` |
+| `JobRefunded` | `jobId`, `client` |
 
 ### Contract setup
 
 ```bash
 cd contracts
 npm install
-
-# Compile
 npx hardhat compile
-
-# Run tests (56 tests covering the full lifecycle)
-npx hardhat test
+npx hardhat test          # 56 tests covering the full lifecycle
 ```
 
-### Deploy to Arc Testnet
+Deploy to Arc Testnet:
 
 ```bash
 npx hardhat ignition deploy ignition/modules/ArcMilestone.ts --network arcTestnet
@@ -126,51 +151,68 @@ Deployment records live in `contracts/ignition/deployments/chain-5042002/` and `
 
 ## Backend
 
-**Language:** Go 1.22+
-**Database:** MySQL 8.0+
-**Key dependencies:**
-- `github.com/decred/dcrd/dcrec/secp256k1` — EIP-191 signature recovery
-- `github.com/ethereum/go-ethereum` — blockchain RPC client
-- `github.com/go-sql-driver/mysql` — MySQL driver
+**Language:** Go 1.26 · **Database:** MySQL 8.0
 
-The backend manages all offchain application state and enforces business rules. The smart contract remains authoritative for escrow funds.
-
-### Architecture
+### Layer structure
 
 ```
 HTTP request
-    ↓
-routes/routes.go       — CORS + logging applied globally
-    ↓
-handlers/              — decode JSON, validate input, call service, write response
-    ↓
-services/              — business rules, domain errors, orchestrate repositories
-    ↓
-repositories/          — parameterised SQL only, no business logic
-    ↓
-MySQL (arcmilestone database)
+    │
+routes/routes.go          CORS middleware + request logging
+    │
+handlers/                 JSON decode, input validation, HTTP response shaping
+    │
+services/                 Business rules, domain errors, cross-repo orchestration
+    │
+repositories/             Parameterised SQL only — no business logic, no string queries
+    │
+MySQL (arcmilestone)
 ```
 
-### What MySQL stores
+The Go standard library handles routing and HTTP. No framework. Each layer has a single responsibility and dependencies are injected from `cmd/api/main.go`, which wires together repositories, services, and handlers in one place before handing control to `net/http`.
 
-- Users and wallet identities
-- Authentication nonces (hashed, single-use, expiring)
-- Jobs (marketplace metadata, status, deadlines)
-- Applications (cover letter, estimated days, status)
-- Submissions (delivery URL, notes)
-- Escrow references (blockchain job ID, funding transaction hash)
-- Notifications
-- Indexed copies of blockchain events (for display and search)
+### Chain event listener
 
-### What MySQL does not store
+`ArcListener` runs as a background goroutine started at boot. It polls `HeaderByNumber` every 2 seconds, builds a `FilterQuery` over the deployed contract address and all six event topics (computed via `crypto.Keccak256Hash` at startup, not hardcoded), and calls `eth_getLogs` for each new block range.
 
-- Private keys, seed phrases, or wallet passwords
-- The authoritative escrow balance (that lives in the contract)
-- `proposed_amount` on applications — payment is fixed by the job
+Each event type has a dedicated handler:
+
+- `JobCreatedAndFundedOpen` — correlates the emitted `metadataHash` against open DB jobs, creates a `job_escrows` row, and records the funding transaction hash.
+- `FreelancerAssigned` — updates escrow status to `funded`, transitions the job to `in_progress`.
+- `WorkSubmitted` — updates escrow status to `work_submitted`.
+- `RevisionRequested` — resets escrow to `funded`, job to `in_progress`.
+- `PaymentReleased` — marks escrow and job `completed`.
+- `JobRefunded` — marks escrow and job `refunded`/`cancelled`.
+
+Every processed event is written to `escrow_events` with a `(blockchain_job_id, log_index, block_number)` deduplication key. Re-processing the same block range is safe. The HTTP handlers never update `escrow_status` directly — the listener is the only path that moves financial state forward.
+
+### Authentication
+
+The backend implements **EIP-191 `personal_sign` wallet authentication** with no password storage and no private key exposure.
+
+1. `POST /api/auth/nonce` — generates 32 bytes of CSPRNG entropy, stores only the SHA-256 hash, returns the plaintext hex string. Nonces expire after 10 minutes.
+2. The frontend passes the plaintext nonce to the connected wallet for signing.
+3. `POST /api/auth/verify` — SHA-256 hashes the submitted nonce, retrieves the stored record (enforcing `used_at IS NULL AND expires_at > NOW()` at the query layer), reconstructs the EIP-191 prefixed message, recovers the signer via secp256k1 ECDSA, and confirms it matches the claimed address. The nonce is immediately marked `used_at`.
+4. A session token is issued. Format: `base64url(payload) + "." + base64url(HMAC-SHA512(payload, secret))`. The payload is binary: 8 bytes user ID (LE) + 8 bytes expiry unix timestamp (LE) + wallet address bytes. No external JWT library.
+5. Every protected request calls `hmac.Equal` (constant-time) to verify the MAC before reading the payload.
+
+### Database schema
+
+| Table | Purpose |
+|---|---|
+| `users` | Wallet address + optional display username. No roles stored. |
+| `auth_nonces` | SHA-256 hashed single-use challenges, `expires_at`, `used_at` |
+| `jobs` | Marketplace metadata: title, description, skills, budget, deadlines, status, selected freelancer |
+| `applications` | Cover letter, estimated days, portfolio URL, application status |
+| `job_escrows` | Chain ID, contract address, on-chain job ID, funding tx hash, escrow status |
+| `job_submissions` | Delivery URL, description, timestamps |
+| `notifications` | In-app events (application received, work submitted, payment released, etc.) |
+| `escrow_events` | Deduplicated on-chain event log — one row per `(job, log_index, block)` |
+| `messages` | Job-scoped threaded discussion between client and selected freelancer |
 
 ### Environment variables
 
-Copy `backend/.env.example` to `backend/.env` and fill in:
+Copy `backend/.env.example` to `backend/.env`:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -181,34 +223,28 @@ Copy `backend/.env.example` to `backend/.env` and fill in:
 | `DB_PASSWORD` | _(required)_ | MySQL password |
 | `DB_NAME` | `arcmilestone` | MySQL database name |
 | `DB_SSL_MODE` | `disable` | `disable`, `preferred`, or `required` |
-| `MYSQL_DSN` | _(empty)_ | Full DSN override — takes precedence over `DB_*` |
+| `MYSQL_DSN` | _(empty)_ | Full DSN override — takes precedence over all `DB_*` vars |
 | `FRONTEND_URL` | `http://localhost:5173` | Allowed CORS origin |
-| `AUTH_SECRET` | _(required)_ | Secret for HMAC-SHA512 session tokens — never commit this |
-| `ARC_RPC_URL` | _(empty)_ | Arc network RPC endpoint |
-| `ARC_CONTRACT_ADDRESS` | _(empty)_ | Deployed ArcMilestone contract address |
+| `AUTH_SECRET` | _(required)_ | HMAC-SHA512 signing key — never commit this |
+| `ARC_RPC_URL` | _(empty)_ | Arc RPC endpoint. Listener is disabled if empty. |
+| `ARC_CONTRACT_ADDRESS` | _(empty)_ | Deployed contract address. Listener is disabled if empty. |
 
 ### Database setup
 
 ```bash
-# Start MySQL
 sudo systemctl start mysql
-
-# Create the database once
 mysql -u <user> -p -e "CREATE DATABASE arcmilestone CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-
-# Apply migrations in order
 mysql -u <user> -p arcmilestone < backend/database/migrations/001_initial_schema.sql
-mysql -u <user> -p arcmilestone < backend/database/migrations/002_remove_proposed_amount.sql
+mysql -u <user> -p arcmilestone < backend/database/migrations/002_processed_events.sql
+mysql -u <user> -p arcmilestone < backend/database/migrations/003_revisions_messages_events.sql
 ```
 
-### Running
+### Running the API
 
 ```bash
 cd backend
 go run ./cmd/api
 ```
-
-The server starts on `http://localhost:8080`. Check it:
 
 ```bash
 curl http://localhost:8080/api/health
@@ -219,59 +255,80 @@ curl http://localhost:8080/api/health
 
 ```bash
 cd backend
-go test ./...
+go test ./...      # unit tests with go-sqlmock — no live DB or chain required
 go vet ./...
 go build ./...
-gofmt -l .        # should print nothing
+gofmt -l .         # should print nothing
 ```
 
-Tests do not require a live database.
+### API reference
 
-### API overview
-
-All JSON requests require `Content-Type: application/json`. Protected routes require `Authorization: Bearer <token>` obtained from `POST /api/auth/verify`.
+All endpoints expect `Content-Type: application/json`. Protected routes require `Authorization: Bearer <token>`.
 
 | Group | Endpoints |
 |---|---|
 | Health | `GET /api/health` |
-| Auth | `POST /api/auth/nonce`, `POST /api/auth/verify`, `GET /api/auth/me`, `POST /api/auth/logout` |
-| Users | `GET /api/users/me`, `PATCH /api/users/me`, `GET /api/users/check-username` |
-| Jobs | `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}`, `PATCH /api/jobs/{id}`, `POST /api/jobs/{id}/publish`, `POST /api/jobs/{id}/cancel` |
-| Applications | `POST /api/jobs/{id}/applications`, `GET /api/jobs/{id}/applications`, `POST /api/jobs/{id}/applications/{applicationId}/accept`, `POST /api/jobs/{id}/applications/{applicationId}/reject`, `GET /api/applications/me`, `POST /api/applications/{id}/withdraw` |
-| Submissions | `POST /api/jobs/{id}/submission`, `GET /api/jobs/{id}/submission` |
-| Escrow | `POST /api/jobs/{id}/escrow`, `GET /api/jobs/{id}/escrow` |
-| Notifications | `GET /api/notifications`, `GET /api/notifications/unread`, `PATCH /api/notifications/{id}/read` |
-
-### Authentication
-
-The backend uses **EIP-191 `personal_sign` wallet authentication** — no passwords, no private key storage.
-
-1. Client calls `POST /api/auth/nonce` with the wallet address.
-2. Backend generates a random 32-byte nonce, stores its **SHA-256 hash**, returns the plaintext. Expires after 10 minutes.
-3. Client passes the plaintext nonce to MetaMask, which signs it and returns a 65-byte signature.
-4. Client calls `POST /api/auth/verify` with the address, plaintext nonce, and signature.
-5. Backend verifies the hash matches a valid unused nonce, recovers the signer from the EIP-191 signature using secp256k1, and checks it matches the claimed address.
-6. Nonce is marked used (prevents replay). A session token is issued.
-7. Session token format: `base64url(payload) + "." + base64url(HMAC-SHA512(payload, AUTH_SECRET))`. Expires after 24 hours.
-
-### Job status lifecycle (offchain)
-
-```
-open → reviewing_applications → in_progress → completed
-                                            ↘ cancelled
-```
-
-`escrow_status` is a separate nullable field (`awaiting_freelancer | funded | work_submitted | completed | refunded`) that mirrors on-chain state. The contract is always the authority.
+| Auth | `POST /api/auth/nonce` · `POST /api/auth/verify` · `GET /api/auth/me` · `POST /api/auth/logout` |
+| Users | `GET /api/users/me` · `PATCH /api/users/me` · `GET /api/users/check-username` |
+| Jobs | `POST /api/jobs` · `GET /api/jobs` · `GET /api/jobs/{id}` · `PATCH /api/jobs/{id}` · `POST /api/jobs/{id}/publish` · `POST /api/jobs/{id}/cancel` |
+| Applications | `POST /api/jobs/{id}/applications` · `GET /api/jobs/{id}/applications` · `POST /api/jobs/{id}/applications/{appId}/accept` · `POST /api/jobs/{id}/applications/{appId}/reject` · `GET /api/applications/me` · `POST /api/applications/{id}/withdraw` |
+| Submissions | `POST /api/jobs/{id}/submission` · `GET /api/jobs/{id}/submission` |
+| Escrow | `POST /api/jobs/{id}/escrow` · `GET /api/jobs/{id}/escrow` |
+| Notifications | `GET /api/notifications` · `GET /api/notifications/unread` · `PATCH /api/notifications/{id}/read` |
 
 ---
 
 ## Frontend
 
-**Framework:** React 19 + Vite 8
-**Wallet library:** viem v2
-**Routing:** React Router v7
-**Styling:** Tailwind CSS v4
-**Icons:** Lucide React
+**Framework:** React 19 + Vite · **Wallet:** viem v2 · **Routing:** React Router v7 · **Styling:** Tailwind CSS v4
+
+### Structure
+
+```
+src/
+├── context/AppContext.jsx         Global auth state, jobs, applications, notifications
+├── services/
+│   ├── api.js                     All backend HTTP calls — centralised fetch wrapper
+│   └── blockchain.js              viem public + wallet clients, full contract ABI
+├── pages/
+│   ├── Home.jsx                   Landing page
+│   ├── CreateJob.jsx              Multi-step job creation form
+│   ├── Jobs.jsx                   Creator's own job list
+│   ├── ExploreJobs.jsx            Public marketplace with filters
+│   ├── JobDetails.jsx             Full job view — all lifecycle actions in one place
+│   ├── ReviewApplications.jsx     Application inbox with accept/reject
+│   ├── MyApplications.jsx         Freelancer's application history
+│   ├── Overview.jsx               Dashboard summary and stats
+│   ├── Notifications.jsx
+│   ├── Transactions.jsx           On-chain event history with decoded log data
+│   ├── Settings.jsx
+│   └── Help.jsx
+├── components/                    Shared UI — Modal, Toast, JobCard, Pagination, etc.
+└── utils/
+    ├── permissions.js             Resource-scoped authorisation helpers
+    ├── format.js                  USDC (18-decimal), date, and address formatting
+    └── pollJob.js                 Post-transaction polling until escrow status updates
+```
+
+### Permission model
+
+All authorisation checks are resource-scoped, not role-based. `permissions.js` never asks "is this user a freelancer?" — it asks "what is this wallet's relationship to job #N?":
+
+```js
+isJobCreator(job, wallet)
+isSelectedFreelancer(job, wallet)
+canApply(job, wallet, applications)         // open + deadline not passed + not creator + not already applied
+canFundJob(job, wallet)                     // creator + no escrow row yet
+canAssignOnChain(job, wallet)               // creator + escrow.status === awaiting_freelancer + freelancer selected
+canSubmitWork(job, wallet)                  // selected freelancer + escrow.status === funded
+canApproveWork(job, wallet)                 // creator + escrow.status === work_submitted or funded
+canCancelUnassignedJob(job, wallet)         // creator + escrow.status === awaiting_freelancer
+canClaimRefund(job, wallet)                 // creator + escrow funded + delivery deadline passed
+canRequestChanges(job, wallet)              // creator + escrow work_submitted or funded
+canClaimPaymentAfterReview(job, wallet, submission)  // selected freelancer + work_submitted + 7+ days elapsed
+```
+
+These gates drive UI visibility only. The smart contract enforces every financial rule independently and will reject any out-of-order call regardless of what the frontend sends.
 
 ### Environment variables
 
@@ -288,144 +345,64 @@ Copy `frontend/.env.example` to `frontend/.env`:
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev       # http://localhost:5173
+npm run build     # production build
 ```
-
-Opens at `http://localhost:5173`.
-
-### Structure
-
-```
-src/
-├── context/AppContext.jsx        — global auth, jobs, applications, notifications state
-├── services/
-│   ├── api.js                    — all backend HTTP calls
-│   └── blockchain.js             — viem wallet + contract interactions
-├── pages/                        — one file per route
-│   ├── Home.jsx
-│   ├── CreateJob.jsx
-│   ├── Jobs.jsx
-│   ├── ExploreJobs.jsx
-│   ├── JobDetails.jsx
-│   ├── ReviewApplications.jsx
-│   ├── MyApplications.jsx
-│   ├── Overview.jsx
-│   ├── Notifications.jsx
-│   ├── Settings.jsx
-│   ├── Transactions.jsx
-│   └── Help.jsx
-├── components/                   — shared UI components
-└── utils/
-    ├── permissions.js            — resource-level authorization helpers
-    ├── format.js                 — date, USDC, address formatting
-    └── pollJob.js                — polls backend until escrow status updates
-```
-
-### Authorization model
-
-Authorization is always resource-based, not role-based. `permissions.js` checks a user's relationship to each specific job:
-
-```js
-isJobCreator(job, walletAddress)              // job.creator_wallet === walletAddress
-isSelectedFreelancer(job, walletAddress)      // job.selected_freelancer_wallet === walletAddress
-canApply(job, walletAddress, applications)
-canFundJob(job, walletAddress)
-canAssignOnChain(job, walletAddress)
-canSubmitWork(job, walletAddress)
-canApproveWork(job, walletAddress)
-canClaimRefund(job, walletAddress)            // deadline passed, status funded
-canCancelUnassignedJob(job, walletAddress)    // anytime, status awaiting_freelancer
-```
-
-There are no permanent `client` or `freelancer` roles on the user object.
 
 ---
 
-## Development Setup (full stack)
+## Local development setup
 
 ### Prerequisites
 
 - Go 1.22+
 - Node.js 18+
 - MySQL 8.0+
-- MetaMask (or compatible EVM wallet)
+- MetaMask or any EIP-1193 compatible wallet browser extension
 - Arc Testnet USDC in your test wallet
 
 ### Steps
 
 ```bash
-# 1. Clone and install
-git clone <repo>
-cd arcmilestone
+# 1. Clone
+git clone <repo> && cd arcmilestone
 
-# 2. Smart contract
+# 2. Compile the contract (generates ABIs used by Hardhat tests)
 cd contracts && npm install && npx hardhat compile
 
 # 3. Backend
 cd ../backend
 cp .env.example .env
-# Fill in DB_USER, DB_PASSWORD, AUTH_SECRET, ARC_CONTRACT_ADDRESS, ARC_RPC_URL
+# Fill in DB_USER, DB_PASSWORD, AUTH_SECRET, ARC_RPC_URL, ARC_CONTRACT_ADDRESS
+
 sudo systemctl start mysql
 mysql -u <user> -p -e "CREATE DATABASE arcmilestone CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -u <user> -p arcmilestone < database/migrations/001_initial_schema.sql
-mysql -u <user> -p arcmilestone < database/migrations/002_remove_proposed_amount.sql
+mysql -u <user> -p arcmilestone < database/migrations/002_processed_events.sql
+mysql -u <user> -p arcmilestone < database/migrations/003_revisions_messages_events.sql
 go run ./cmd/api
 
 # 4. Frontend (new terminal)
 cd ../frontend
 cp .env.example .env
 # Set VITE_CONTRACT_ADDRESS to the deployed contract address
-npm install
-npm run dev
+npm install && npm run dev
 ```
 
-Open `http://localhost:5173`, click **Connect Wallet**, approve the MetaMask sign-in prompt, and you are authenticated.
+Open `http://localhost:5173`, connect your wallet, sign the nonce prompt, and you are authenticated. No username or password is required or stored.
 
 ---
 
-## Important Rules
+## Security notes
 
-**Never store in the database:**
-- Private keys, seed phrases, or wallet passwords
-- `proposed_amount` on applications — the payment is fixed by the job
-- Permanent `role` fields on users — roles are contextual per job
+**Private keys and seed phrases** never touch the backend. Authentication works by asking the wallet to sign a server-generated challenge. The backend only ever sees the public address and the signature.
 
-**Never trust the frontend for financial state:**
-- Do not mark a job as funded because the frontend says so
-- Blockchain event confirmation via the indexer is required to update `escrow_status`
+**Nonces** are 32 bytes of CSPRNG entropy, hex-encoded. The backend stores only the SHA-256 hash. The plaintext is never written to disk or a database. Replay is prevented at the SQL query level (`used_at IS NULL AND expires_at > NOW()`), not in application code where it could be accidentally bypassed.
 
-**Authorization always checks the resource:**
-- "Can this user edit job #10?" → check `job.creator_user_id == caller`
-- "Can this user submit work on job #10?" → check `job.selected_freelancer_wallet == caller`
-- Never check a permanent role field
+**Session tokens** are custom binary-payload + HMAC-SHA512 tokens with no external JWT library. `hmac.Equal` (constant-time comparison) is used on every request. The payload encodes user ID, expiry, and wallet address as fixed-length binary fields — not JSON, not base64-padded strings.
 
----
+**Escrow state** can only move forward via confirmed on-chain events processed by the `ArcListener`. No HTTP handler updates `escrow_status`. A compromised API server cannot fabricate a payment release or refund — the contract will reject the transaction, and the listener will see no matching event.
 
-## Verification Commands
+**Reentrancy** is blocked by a manual `_reentrancyEntered` flag combined with checks-effects-interactions on all fund-moving functions. There is no dependency on OpenZeppelin's `ReentrancyGuard`, but the pattern is identical.
 
-```bash
-# Backend
-cd backend
-go test ./...
-go vet ./...
-gofmt -l .
-
-# Frontend
-cd frontend
-npm run build
-
-# Smart contract
-cd contracts
-npx hardhat compile
-npx hardhat test   # 56 tests
-```
-
----
-
-## Security Notes
-
-- `AUTH_SECRET` and `DB_PASSWORD` must never be committed. Both are in `.gitignore`.
-- Nonces are stored as SHA-256 hashes only — the plaintext is never persisted.
-- Session token MAC uses constant-time comparison (`hmac.Equal`) to prevent timing attacks.
-- The smart contract uses the checks-effects-interactions pattern and a reentrancy guard on all fund-moving functions.
-- The contract rejects direct ETH/native-asset payments that arrive outside the expected function calls.
+`AUTH_SECRET` and `DB_PASSWORD` must never be committed. Both are listed in `.gitignore`.
