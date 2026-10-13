@@ -47,6 +47,7 @@ contract ArcMilestone {
   error DirectPaymentNotAllowed();
   error FreelancerAlreadyAssigned(uint256 jobId);
   error JobNotAwaitingFreelancer(uint256 jobId, JobStatus currentStatus);
+  error ReviewPeriodNotOver(uint256 jobId, uint256 claimableAt, uint256 currentTimestamp);
 
   // =====================================================
   // SECTION 2: JOB STATUS
@@ -89,7 +90,19 @@ contract ArcMilestone {
     bytes32 metadataHash;
     bytes32 deliverableHash;
     JobStatus status;
+    // Timestamp of the latest submitWork call (0 until work is submitted).
+    uint256 submittedAt;
   }
+
+  /// @notice How long the client has to approve or request changes after a
+  ///         submission. After this the freelancer may claim the payment, so a
+  ///         silent client can never lock earned funds forever.
+  uint256 public constant REVIEW_PERIOD = 7 days;
+
+  /// @notice Minimum time a freelancer gets to rework after a revision request.
+  ///         The deadline is extended if needed, so a client cannot request a
+  ///         revision at the last second and then refund.
+  uint256 public constant REVISION_WINDOW = 3 days;
 
   // =====================================================
   // SECTION 4: CONTRACT STORAGE
@@ -150,6 +163,12 @@ contract ArcMilestone {
     uint256 indexed jobId,
     address indexed client,
     uint256 amount
+  );
+
+  event RevisionRequested(
+    uint256 indexed jobId,
+    address indexed client,
+    uint256 newDeadline
   );
 
   // =====================================================
@@ -231,7 +250,8 @@ contract ArcMilestone {
       deadline: deadline,
       metadataHash: metadataHash,
       deliverableHash: bytes32(0),
-      status: JobStatus.AwaitingFreelancer
+      status: JobStatus.AwaitingFreelancer,
+      submittedAt: 0
     });
 
     totalLocked += msg.value;
@@ -323,9 +343,75 @@ contract ArcMilestone {
 
     job.deliverableHash = deliverableHash;
     job.status = JobStatus.WorkSubmitted;
+    job.submittedAt = block.timestamp;
 
     // No payment leaves here. The client must separately review and approve.
     emit WorkSubmitted(jobId, msg.sender, deliverableHash);
+  }
+
+  // =====================================================
+  // SECTION 9B: REQUEST A REVISION
+  // =====================================================
+
+  /// @notice Lets the client reject the current delivery and send the job back
+  ///         to the freelancer. Funds stay locked. The freelancer is guaranteed
+  ///         at least REVISION_WINDOW to resubmit (deadline is extended).
+  ///         Accepts jobs in WorkSubmitted state (on-chain submit) or Funded state (off-chain submit).
+  function requestRevision(
+    uint256 jobId
+  ) external jobExists(jobId) onlyJobClient(jobId) {
+    Job storage job = _jobs[jobId];
+
+    if (
+      job.status != JobStatus.WorkSubmitted &&
+      job.status != JobStatus.Funded
+    ) {
+      revert WrongJobStatus(jobId, job.status, JobStatus.WorkSubmitted);
+    }
+
+    uint256 minimumDeadline = block.timestamp + REVISION_WINDOW;
+    if (job.deadline < minimumDeadline) {
+      job.deadline = minimumDeadline;
+    }
+
+    job.status = JobStatus.Funded;
+    job.submittedAt = 0;
+
+    emit RevisionRequested(jobId, msg.sender, job.deadline);
+  }
+
+  // =====================================================
+  // SECTION 9C: CLAIM PAYMENT AFTER AN UNANSWERED REVIEW
+  // =====================================================
+
+  /// @notice If the client neither approves nor requests changes within
+  ///         REVIEW_PERIOD of a submission, the freelancer may claim payment.
+  function claimPaymentAfterReview(
+    uint256 jobId
+  ) external jobExists(jobId) onlyAssignedFreelancer(jobId) nonReentrant {
+    Job storage job = _jobs[jobId];
+
+    if (job.status != JobStatus.WorkSubmitted) {
+      revert WrongJobStatus(jobId, job.status, JobStatus.WorkSubmitted);
+    }
+
+    uint256 claimableAt = job.submittedAt + REVIEW_PERIOD;
+    if (block.timestamp <= claimableAt) {
+      revert ReviewPeriodNotOver(jobId, claimableAt, block.timestamp);
+    }
+
+    uint256 amount = job.amount;
+    address freelancer = job.freelancer;
+
+    job.status = JobStatus.Completed;
+    totalLocked -= amount;
+
+    (bool success, ) = payable(freelancer).call{value: amount}("");
+    if (!success) {
+      revert PaymentTransferFailed(jobId, freelancer, amount);
+    }
+
+    emit PaymentReleased(jobId, freelancer, amount);
   }
 
   // =====================================================
@@ -333,6 +419,7 @@ contract ArcMilestone {
   // =====================================================
 
   /// @notice Lets the client approve submitted work and pay the freelancer.
+  ///         Accepts jobs in WorkSubmitted state (on-chain submit) or Funded state (zero-gas off-chain submit).
   function approveAndRelease(
     uint256 jobId
   ) external jobExists(jobId) onlyJobClient(jobId) nonReentrant {
@@ -342,7 +429,10 @@ contract ArcMilestone {
 
     Job storage job = _jobs[jobId];
 
-    if (job.status != JobStatus.WorkSubmitted) {
+    if (
+      job.status != JobStatus.WorkSubmitted &&
+      job.status != JobStatus.Funded
+    ) {
       revert WrongJobStatus(jobId, job.status, JobStatus.WorkSubmitted);
     }
 

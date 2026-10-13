@@ -391,14 +391,28 @@ describe("ArcMilestone", async function () {
       );
     });
 
-    it("requires WorkSubmitted status", async function () {
-      const { client, escrow } = await createAssignedJob();
+    it("allows approval directly from Funded status (off-chain submission)", async function () {
+      const { client, freelancer, escrow } = await createAssignedJob();
+
+      await viem.assertions.balancesHaveChanged(
+        escrow.write.approveAndRelease([1n], { account: client.account }),
+        [
+          { address: escrow.address, amount: -PAYMENT },
+          { address: freelancer.account.address, amount: PAYMENT },
+        ],
+      );
+
+      assert.equal((await escrow.read.getJob([1n])).status, STATUS_COMPLETED);
+    });
+
+    it("rejects approval when job is still awaiting freelancer assignment", async function () {
+      const { client, escrow } = await createOpenJob();
 
       await viem.assertions.revertWithCustomErrorWithArgs(
         escrow.write.approveAndRelease([1n], { account: client.account }),
         escrow,
         "WrongJobStatus",
-        [1n, STATUS_FUNDED, STATUS_WORK_SUBMITTED],
+        [1n, STATUS_AWAITING_FREELANCER, STATUS_WORK_SUBMITTED],
       );
     });
 
@@ -656,6 +670,88 @@ describe("ArcMilestone", async function () {
   // =====================================================
   // READS, DIRECT TRANSFERS, AND MULTIPLE JOBS
   // =====================================================
+
+  describe("requestRevision", function () {
+    it("moves WorkSubmitted back to Funded and lets the freelancer resubmit", async function () {
+      const { client, freelancer, escrow } = await createSubmittedJob();
+      await escrow.write.requestRevision([1n], { account: client.account });
+
+      let job = await escrow.read.getJob([1n]);
+      assert.equal(job.status, STATUS_FUNDED);
+      assert.equal(job.submittedAt, 0n);
+
+      await escrow.write.submitWork([1n, DELIVERABLE_HASH], { account: freelancer.account });
+      job = await escrow.read.getJob([1n]);
+      assert.equal(job.status, STATUS_WORK_SUBMITTED);
+    });
+
+    it("extends the deadline so the freelancer gets the revision window", async function () {
+      const { client, escrow, deadline } = await createSubmittedJob();
+      // Move close to the deadline, then request a revision.
+      await networkHelpers.time.increaseTo(deadline - 60n);
+      await escrow.write.requestRevision([1n], { account: client.account });
+      const job = await escrow.read.getJob([1n]);
+      const window = await escrow.read.REVISION_WINDOW();
+      assert.ok(job.deadline >= deadline - 60n + window);
+    });
+
+    it("allows revision requests from Funded state (off-chain submission)", async function () {
+      const { client, escrow } = await createAssignedJob();
+      await escrow.write.requestRevision([1n], { account: client.account });
+      const job = await escrow.read.getJob([1n]);
+      assert.equal(job.status, STATUS_FUNDED);
+    });
+
+    it("rejects revision requests when awaiting freelancer or from non-clients", async function () {
+      const { client, escrow } = await createOpenJob();
+      await viem.assertions.revertWithCustomError(
+        escrow.write.requestRevision([1n], { account: client.account }),
+        escrow,
+        "WrongJobStatus",
+      );
+      const { freelancer, escrow: assignedEscrow } = await createAssignedJob();
+      await viem.assertions.revertWithCustomError(
+        assignedEscrow.write.requestRevision([1n], { account: freelancer.account }),
+        assignedEscrow,
+        "CallerIsNotClient",
+      );
+    });
+  });
+
+  describe("claimPaymentAfterReview", function () {
+    it("rejects claims before the review period ends", async function () {
+      const { freelancer, escrow } = await createSubmittedJob();
+      await viem.assertions.revertWithCustomError(
+        escrow.write.claimPaymentAfterReview([1n], { account: freelancer.account }),
+        escrow,
+        "ReviewPeriodNotOver",
+      );
+    });
+
+    it("pays the freelancer when the client stays silent", async function () {
+      const { freelancer, escrow } = await createSubmittedJob();
+      const period = await escrow.read.REVIEW_PERIOD();
+      const job = await escrow.read.getJob([1n]);
+      await networkHelpers.time.increaseTo(job.submittedAt + period + 1n);
+
+      const before = await publicClient.getBalance({ address: freelancer.account.address });
+      await escrow.write.claimPaymentAfterReview([1n], { account: freelancer.account });
+      const after = await publicClient.getBalance({ address: freelancer.account.address });
+
+      assert.equal((await escrow.read.getJob([1n])).status, STATUS_COMPLETED);
+      assert.equal(await escrow.read.totalLocked(), 0n);
+      assert.ok(after > before);
+    });
+
+    it("rejects claims by anyone but the assigned freelancer", async function () {
+      const { stranger, escrow } = await createSubmittedJob();
+      await viem.assertions.revertWithCustomError(
+        escrow.write.claimPaymentAfterReview([1n], { account: stranger.account }),
+        escrow,
+        "CallerIsNotFreelancer",
+      );
+    });
+  });
 
   describe("escrow integrity", function () {
     it("rejects nonexistent IDs in read and write functions", async function () {

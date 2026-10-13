@@ -22,7 +22,9 @@ type Application struct {
 	CoverLetter     string            `json:"cover_letter"`
 	EstimatedDays   uint32            `json:"estimated_days"`
 	PortfolioURL    *string           `json:"portfolio_url"`
-	Status          ApplicationStatus `json:"status"`
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
+	Status            ApplicationStatus `json:"status"`
+	ApplicantWallet   string            `json:"applicant_wallet"`
+	ApplicantUsername *string           `json:"applicant_username"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
 }

@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import AppProvider from './context/AppContext'
+import { ToastProvider } from './components/Toast'
 import DashboardLayout from './layouts/DashboardLayout'
 import useApp from './hooks/useApp'
 import UsernameSetupModal from './components/UsernameSetupModal'
@@ -115,7 +116,9 @@ function App() {
   return (
     <BrowserRouter>
       <AppProvider>
-        <AppRoutes />
+        <ToastProvider>
+          <AppRoutes />
+        </ToastProvider>
       </AppProvider>
     </BrowserRouter>
   )

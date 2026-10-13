@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"arcmilestone/middleware"
+	"arcmilestone/repositories"
 	"arcmilestone/services"
 	"arcmilestone/utils"
 )
@@ -184,13 +185,35 @@ func (h *JobHandler) Patch(w http.ResponseWriter, r *http.Request) {
 	utils.WriteJSON(w, http.StatusOK, job)
 }
 
+func parsePagination(r *http.Request) (int, int) {
+	page := 1
+	limit := 10
+	if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 0 {
+		page = p
+	}
+	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 50 {
+		limit = l
+	}
+	return page, limit
+}
+
 // List handles GET /api/jobs (public, optional auth).
 //
 // Query params:
-//   - ?mine=true  lists the caller's jobs (requires auth)
-//   - (no params) lists all OPEN jobs
+//   - ?mine=true      lists the caller's jobs (requires auth)
+//   - ?assigned=true  lists jobs where caller is selected freelancer (requires auth)
+//   - ?page=1&limit=10 pagination parameters
+//   - ?q=...          title & description search query
+//   - ?skill=...      filter by required skill
+//   - ?budget=...     filter by budget range (under-100, 100-250, over-250)
+//   - ?group=...      filter by group (active, needs_review, in_progress, submitted, history)
 func (h *JobHandler) List(w http.ResponseWriter, r *http.Request) {
+	page, limit := parsePagination(r)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	group := strings.TrimSpace(r.URL.Query().Get("group"))
+
 	mine := r.URL.Query().Get("mine") == "true"
+	assigned := r.URL.Query().Get("assigned") == "true"
 
 	if mine {
 		userID, ok := middleware.UserIDFromContext(r.Context())
@@ -198,21 +221,47 @@ func (h *JobHandler) List(w http.ResponseWriter, r *http.Request) {
 			utils.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 			return
 		}
-		jobs, err := h.svc.ListByCreator(r.Context(), userID)
+		jobs, pagination, err := h.svc.ListByCreatorPaginated(r.Context(), userID, group, q, page, limit)
 		if err != nil {
 			utils.WriteError(w, err)
 			return
 		}
-		utils.WriteJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+		utils.WriteJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "pagination": pagination})
 		return
 	}
 
-	jobs, err := h.svc.ListOpen(r.Context())
+	if assigned {
+		userID, ok := middleware.UserIDFromContext(r.Context())
+		if !ok {
+			utils.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+			return
+		}
+		jobs, pagination, err := h.svc.ListByFreelancerPaginated(r.Context(), userID, group, q, page, limit)
+		if err != nil {
+			utils.WriteError(w, err)
+			return
+		}
+		utils.WriteJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "pagination": pagination})
+		return
+	}
+
+	var callerPtr *uint64
+	if userID, ok := middleware.UserIDFromContext(r.Context()); ok {
+		callerPtr = &userID
+	}
+
+	filter := repositories.OpenJobsFilter{
+		Query:  q,
+		Skill:  strings.TrimSpace(r.URL.Query().Get("skill")),
+		Budget: strings.TrimSpace(r.URL.Query().Get("budget")),
+	}
+
+	jobs, pagination, err := h.svc.ListOpenPaginated(r.Context(), callerPtr, filter, page, limit)
 	if err != nil {
 		utils.WriteError(w, err)
 		return
 	}
-	utils.WriteJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+	utils.WriteJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "pagination": pagination})
 }
 
 // GetByID handles GET /api/jobs/{id} (public).

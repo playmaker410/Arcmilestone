@@ -2,3 +2,4 @@
 *.log
 bin/
 coverage.out
+cmd/api/api_bin

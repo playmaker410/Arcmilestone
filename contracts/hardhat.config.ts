@@ -5,6 +5,9 @@
 // The Viem toolbox keeps Viem, the Node Test Runner, Ignition, assertions, and
 // Hardhat's encrypted keystore support available to this project.
 
+import dns from "node:dns";
+dns.setDefaultResultOrder?.("ipv4first");
+
 import hardhatToolboxViemPlugin from "@nomicfoundation/hardhat-toolbox-viem";
 import { configVariable, defineConfig } from "hardhat/config";
 
@@ -88,8 +91,9 @@ export default defineConfig({
       type: "http",
       chainType: "l1",
       chainId: 5_042_002,
-      url: configVariable("ARC_TESTNET_RPC_URL"),
+      url: process.env.ARC_TESTNET_RPC_URL || process.env.HARDHAT_VAR_ARC_TESTNET_RPC_URL || configVariable("ARC_TESTNET_RPC_URL"),
       accounts: [configVariable("ARC_DEPLOYER_PRIVATE_KEY")],
+      timeout: 60_000,
       ignition: {
         // Arc currently requires maxFeePerGas to be at least 20 Gwei. No fixed gas
         // limit is needed because Hardhat and the RPC can estimate deployment gas.

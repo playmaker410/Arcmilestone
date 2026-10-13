@@ -8,6 +8,7 @@ import (
 
 	"arcmilestone/handlers"
 	"arcmilestone/middleware"
+	"arcmilestone/repositories"
 	"arcmilestone/services"
 )
 
@@ -21,6 +22,8 @@ func New(
 	subSvc *services.SubmissionService,
 	notifSvc *services.NotificationService,
 	escrowSvc *services.JobEscrowService,
+	msgSvc *services.MessageService,
+	txRepo *repositories.EscrowEventRepository,
 	frontendURL string,
 ) http.Handler {
 	mux := http.NewServeMux()
@@ -37,6 +40,8 @@ func New(
 	subHandler := handlers.NewSubmissionHandler(subSvc)
 	notifHandler := handlers.NewNotificationHandler(notifSvc)
 	escrowHandler := handlers.NewJobEscrowHandler(escrowSvc)
+	msgHandler := handlers.NewMessageHandler(msgSvc)
+	txHandler := handlers.NewTransactionHandler(txRepo)
 
 	// -----------------------------------------------------------------------
 	// Auth routes
@@ -78,7 +83,19 @@ func New(
 	// Submission routes
 	// -----------------------------------------------------------------------
 	mux.Handle("POST /api/jobs/{id}/submission", auth(http.HandlerFunc(subHandler.Submit)))
+	mux.Handle("POST /api/jobs/{id}/submission/request-changes", auth(http.HandlerFunc(subHandler.RequestChanges)))
 	mux.Handle("GET /api/jobs/{id}/submission", auth(http.HandlerFunc(subHandler.GetByJob)))
+
+	// -----------------------------------------------------------------------
+	// Message routes (Job workspace discussion)
+	// -----------------------------------------------------------------------
+	mux.Handle("GET /api/jobs/{id}/messages", auth(http.HandlerFunc(msgHandler.List)))
+	mux.Handle("POST /api/jobs/{id}/messages", auth(http.HandlerFunc(msgHandler.Post)))
+
+	// -----------------------------------------------------------------------
+	// Transaction routes
+	// -----------------------------------------------------------------------
+	mux.Handle("GET /api/transactions", auth(http.HandlerFunc(txHandler.List)))
 
 	// -----------------------------------------------------------------------
 	// Escrow routes
@@ -87,6 +104,7 @@ func New(
 	// -----------------------------------------------------------------------
 	mux.Handle("POST /api/jobs/{id}/escrow", auth(http.HandlerFunc(escrowHandler.RecordEscrow)))
 	mux.HandleFunc("GET /api/jobs/{id}/escrow", escrowHandler.GetEscrow)
+	mux.Handle("POST /api/jobs/{id}/sync_escrow", auth(http.HandlerFunc(escrowHandler.SyncEscrow)))
 
 	// -----------------------------------------------------------------------
 	// Notification routes

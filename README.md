@@ -1,6 +1,8 @@
 # ArcMilestone
 
-A blockchain escrow platform built on Arc Testnet. Users create fixed-payment jobs, apply to other users' jobs, and send or receive payments through a smart contract. A user's role — client or freelancer — is determined by their relationship to a specific job, not permanently assigned to their account.
+ArcMilestone is a decentralised escrow platform built on Arc Testnet. It lets clients post fixed-price jobs, collect applications from freelancers, and release payment through a smart contract — only after approving the submitted work. No intermediary holds the funds at any point.
+
+The platform is a full-stack proof of concept: a deployed Solidity contract handles all on-chain escrow logic, a Go API manages off-chain state, and a React frontend connects wallets and walks both parties through the job lifecycle.
 
 ---
 
@@ -69,8 +71,8 @@ arcmilestone/
 **File:** `contracts/contracts/ArcMilestone.sol`
 **Network:** Arc Testnet
 **Chain ID:** `5042002`
-**Deployed address:** `0xFdb8866dC4030099260A9E8E2E346ec4C8EEF7BC`
-**Explorer:** https://testnet.arcscan.app/address/0xFdb8866dC4030099260A9E8E2E346ec4C8EEF7BC
+**Deployed address:** `0x9e16cC1DEC047DeAa798C757291Fd1f629Ad144d`
+**Explorer:** https://testnet.arcscan.app/address/0x9e16cC1DEC047DeAa798C757291Fd1f629Ad144d
 
 The contract is the financial authority. It is responsible for:
 
@@ -255,8 +257,8 @@ The backend uses **EIP-191 `personal_sign` wallet authentication** — no passwo
 ### Job status lifecycle (offchain)
 
 ```
-draft → open → reviewing_applications → awaiting_funding → in_progress → completed
-                                                                        ↘ cancelled
+open → reviewing_applications → in_progress → completed
+                                            ↘ cancelled
 ```
 
 `escrow_status` is a separate nullable field (`awaiting_freelancer | funded | work_submitted | completed | refunded`) that mirrors on-chain state. The contract is always the authority.
@@ -396,17 +398,6 @@ Open `http://localhost:5173`, click **Connect Wallet**, approve the MetaMask sig
 - "Can this user edit job #10?" → check `job.creator_user_id == caller`
 - "Can this user submit work on job #10?" → check `job.selected_freelancer_wallet == caller`
 - Never check a permanent role field
-
----
-
-## Remaining Work
-
-1. **Blockchain event listener** — `services/arc_listener.go` is a stub. Needs to poll or subscribe to Arc contract logs, decode events, and update `escrow_status` on jobs.
-2. **Submission update endpoint** — `SubmissionRepository.Update` exists but no HTTP endpoint exposes it for recording `deliverable_hash` and `submission_transaction_hash` after on-chain confirmation.
-3. **Pagination** — all list endpoints return all rows.
-4. **Token revocation** — logout is client-side only; no server-side blocklist.
-5. **Rate limiting** — no rate limiting on public endpoints.
-6. **Production hardening** — TLS termination, structured logging, metrics, health-check DB probe.
 
 ---
 

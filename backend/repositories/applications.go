@@ -29,15 +29,21 @@ type CreateApplicationParams struct {
 }
 
 const applicationColumns = `
-	id,
-	job_id,
-	applicant_user_id,
-	cover_letter,
-	estimated_days,
-	portfolio_url,
-	status,
-	created_at,
-	updated_at`
+	a.id,
+	a.job_id,
+	a.applicant_user_id,
+	a.cover_letter,
+	a.estimated_days,
+	a.portfolio_url,
+	a.status,
+	u.wallet_address AS applicant_wallet,
+	u.username AS applicant_username,
+	a.created_at,
+	a.updated_at`
+
+const applicationFrom = `
+	FROM applications a
+	JOIN users u ON u.id = a.applicant_user_id`
 
 // NewApplicationRepository constructs a repository using an existing connection pool.
 func NewApplicationRepository(db *sql.DB) *ApplicationRepository {
@@ -81,7 +87,7 @@ func (r *ApplicationRepository) Create(ctx context.Context, params CreateApplica
 // is returned as a wrapped sql.ErrNoRows.
 func (r *ApplicationRepository) FindByID(ctx context.Context, id uint64) (*models.Application, error) {
 	app, err := scanApplication(r.db.QueryRowContext(ctx,
-		"SELECT "+applicationColumns+" FROM applications WHERE id = ?",
+		"SELECT "+applicationColumns+applicationFrom+" WHERE a.id = ?",
 		id,
 	))
 	if err != nil {
@@ -95,10 +101,9 @@ func (r *ApplicationRepository) FindByID(ctx context.Context, id uint64) (*model
 // that the earliest applicants are naturally surfaced at the top.
 func (r *ApplicationRepository) ListByJob(ctx context.Context, jobID uint64) ([]*models.Application, error) {
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT "+applicationColumns+`
-		FROM applications
-		WHERE job_id = ?
-		ORDER BY created_at ASC, id ASC`,
+		"SELECT "+applicationColumns+applicationFrom+`
+		WHERE a.job_id = ?
+		ORDER BY a.created_at ASC, a.id ASC`,
 		jobID,
 	)
 	if err != nil {
@@ -112,10 +117,9 @@ func (r *ApplicationRepository) ListByJob(ctx context.Context, jobID uint64) ([]
 // ListByApplicant returns all applications submitted by a given user, newest first.
 func (r *ApplicationRepository) ListByApplicant(ctx context.Context, applicantUserID uint64) ([]*models.Application, error) {
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT "+applicationColumns+`
-		FROM applications
-		WHERE applicant_user_id = ?
-		ORDER BY created_at DESC, id DESC`,
+		"SELECT "+applicationColumns+applicationFrom+`
+		WHERE a.applicant_user_id = ?
+		ORDER BY a.created_at DESC, a.id DESC`,
 		applicantUserID,
 	)
 	if err != nil {
@@ -131,10 +135,9 @@ func (r *ApplicationRepository) ListByApplicant(ctx context.Context, applicantUs
 // before attempting an insert. A missing row returns a wrapped sql.ErrNoRows.
 func (r *ApplicationRepository) FindByJobAndApplicant(ctx context.Context, jobID, applicantUserID uint64) (*models.Application, error) {
 	app, err := scanApplication(r.db.QueryRowContext(ctx,
-		"SELECT "+applicationColumns+`
-		FROM applications
-		WHERE job_id = ?
-		  AND applicant_user_id = ?`,
+		"SELECT "+applicationColumns+applicationFrom+`
+		WHERE a.job_id = ?
+		  AND a.applicant_user_id = ?`,
 		jobID,
 		applicantUserID,
 	))
@@ -189,6 +192,8 @@ func scanApplication(row rowScanner) (*models.Application, error) {
 		&a.EstimatedDays,
 		&a.PortfolioURL,
 		&a.Status,
+		&a.ApplicantWallet,
+		&a.ApplicantUsername,
 		&a.CreatedAt,
 		&a.UpdatedAt,
 	); err != nil {

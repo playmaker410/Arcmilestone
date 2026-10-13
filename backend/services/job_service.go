@@ -78,6 +78,7 @@ func (s *JobService) Create(ctx context.Context, creatorUserID uint64, params Cr
 
 // GetByID returns a single enriched job. Returns apperr.ErrNotFound if absent.
 func (s *JobService) GetByID(ctx context.Context, id uint64) (*models.JobDetail, error) {
+	_ = s.jobs.ExpireJobs(ctx)
 	job, err := s.jobs.FindDetailByID(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, apperr.ErrNotFound
@@ -90,12 +91,41 @@ func (s *JobService) GetByID(ctx context.Context, id uint64) (*models.JobDetail,
 
 // ListOpen returns all enriched jobs with status OPEN.
 func (s *JobService) ListOpen(ctx context.Context) ([]*models.JobDetail, error) {
+	_ = s.jobs.ExpireJobs(ctx)
 	return s.jobs.ListOpenDetail(ctx)
 }
 
 // ListByCreator returns all enriched jobs posted by the given user.
 func (s *JobService) ListByCreator(ctx context.Context, userID uint64) ([]*models.JobDetail, error) {
+	_ = s.jobs.ExpireJobs(ctx)
 	return s.jobs.ListByCreatorDetail(ctx, userID)
+}
+
+func (s *JobService) ListOpenPaginated(ctx context.Context, callerUserID *uint64, filter repositories.OpenJobsFilter, page, limit int) ([]*models.JobDetail, models.Pagination, error) {
+	_ = s.jobs.ExpireJobs(ctx)
+	jobs, total, err := s.jobs.ListOpenPaginated(ctx, callerUserID, filter, page, limit)
+	if err != nil {
+		return nil, models.Pagination{}, err
+	}
+	return jobs, models.NewPagination(page, limit, total), nil
+}
+
+func (s *JobService) ListByCreatorPaginated(ctx context.Context, userID uint64, group, q string, page, limit int) ([]*models.JobDetail, models.Pagination, error) {
+	_ = s.jobs.ExpireJobs(ctx)
+	jobs, total, err := s.jobs.ListByCreatorPaginated(ctx, userID, group, q, page, limit)
+	if err != nil {
+		return nil, models.Pagination{}, err
+	}
+	return jobs, models.NewPagination(page, limit, total), nil
+}
+
+func (s *JobService) ListByFreelancerPaginated(ctx context.Context, userID uint64, group, q string, page, limit int) ([]*models.JobDetail, models.Pagination, error) {
+	_ = s.jobs.ExpireJobs(ctx)
+	jobs, total, err := s.jobs.ListByFreelancerPaginated(ctx, userID, group, q, page, limit)
+	if err != nil {
+		return nil, models.Pagination{}, err
+	}
+	return jobs, models.NewPagination(page, limit, total), nil
 }
 
 // Publish transitions a job from OPEN to REVIEWING_APPLICATIONS.

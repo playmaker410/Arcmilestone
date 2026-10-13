@@ -29,6 +29,17 @@ async function request(path, options = {}) {
   return data
 }
 
+// Build a query string, skipping empty / 'all' values.
+function qs(params = {}) {
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '' || value === false || value === 'all') return
+    search.set(key, String(value))
+  })
+  const str = search.toString()
+  return str ? `?${str}` : ''
+}
+
 export const api = {
   // Auth
   nonce: (walletAddress) => request('/api/auth/nonce', { method: 'POST', body: JSON.stringify({ wallet_address: walletAddress }) }),
@@ -73,7 +84,13 @@ export const api = {
 
   // Jobs
   createJob: (body) => request('/api/jobs', { method: 'POST', body: JSON.stringify(body) }),
-  listJobs: (mine = false) => request(mine ? '/api/jobs?mine=true' : '/api/jobs'),
+  /**
+   * List jobs with server-side filtering + pagination.
+   * @param {{mine?: boolean, assigned?: boolean, page?: number, limit?: number, q?: string, skill?: string, budget?: string, group?: string}} params
+   * Returns { jobs, pagination: { page, limit, total, total_pages } }
+   */
+  listJobs: ({ mine, assigned, page = 1, limit = 12, q, skill, budget, group } = {}) =>
+    request(`/api/jobs${qs({ mine: mine ? 'true' : undefined, assigned: assigned ? 'true' : undefined, page, limit, q: q?.trim(), skill, budget, group })}`),
   getJob: (id) => request(`/api/jobs/${id}`),
   updateJob: (id, body) => request(`/api/jobs/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   publishJob: (id) => request(`/api/jobs/${id}/publish`, { method: 'POST' }),
@@ -91,9 +108,18 @@ export const api = {
   // Submissions
   createSubmission: (jobId, body) => request(`/api/jobs/${jobId}/submission`, { method: 'POST', body: JSON.stringify(body) }),
   getSubmission: (jobId) => request(`/api/jobs/${jobId}/submission`),
+  requestChanges: (jobId, feedback) => request(`/api/jobs/${jobId}/submission/request-changes`, { method: 'POST', body: JSON.stringify({ feedback }) }),
+
+  // Job workspace messages
+  getMessages: (jobId, afterId) => request(`/api/jobs/${jobId}/messages${qs({ after_id: afterId })}`),
+  sendMessage: (jobId, body) => request(`/api/jobs/${jobId}/messages`, { method: 'POST', body: JSON.stringify({ body }) }),
+
+  // Transactions
+  getTransactions: ({ page = 1, limit = 20 } = {}) => request(`/api/transactions${qs({ page, limit })}`),
 
   getEscrow: (jobId) => request(`/api/jobs/${jobId}/escrow`),
   recordEscrow: (jobId, body) => request(`/api/jobs/${jobId}/escrow`, { method: 'POST', body: JSON.stringify(body) }),
+  syncEscrow: (jobId, txHash) => request(`/api/jobs/${jobId}/sync_escrow`, { method: 'POST', body: JSON.stringify({ transaction_hash: txHash }) }),
 
   // Notifications
   getNotifications: () => request('/api/notifications'),

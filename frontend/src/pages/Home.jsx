@@ -34,7 +34,7 @@ const features = [
   { title: 'Clear job states', description: 'Both parties see the same milestone status, payment amount, deadline, and activity history.', icon: Gauge },
   { title: 'Wallet controlled', description: 'Users approve actions from their own wallet. ArcMilestone never asks for private keys.', icon: WalletCards },
   { title: 'Built for Arc', description: 'A focused experience designed around fast, low-cost transactions on the Arc network.', icon: Zap },
-  { title: 'Verifiable activity', description: 'Funding and release transactions will be traceable on Arc Explorer after integration.', icon: Fingerprint },
+  { title: 'Verifiable activity', description: 'Funding and release transactions are recorded on-chain and traceable on Arc Explorer.', icon: Fingerprint },
   { title: 'Simple by design', description: 'Purposeful workflows help clients and freelancers move from agreement to payment quickly.', icon: Sparkles },
 ]
 
@@ -79,7 +79,7 @@ export default function Home() {
 
         <section id="faq" className="scroll-mt-18 bg-slate-50 py-20 sm:py-24"><div className="container-shell grid gap-10 lg:grid-cols-[.72fr_1.28fr]"><div><p className="eyebrow">Common questions</p><h2 className="section-heading mt-3">Clear answers, before you fund</h2><p className="mt-4 max-w-sm text-sm leading-6 text-slate-600">Learn how escrow, wallet approvals, and USDC payments are intended to work.</p></div><div className="card px-5 sm:px-7"><Accordion items={faqs} /></div></div></section>
 
-        <section className="bg-white py-20"><div className="container-shell"><div className="rounded-3xl border border-mint-100 bg-mint-50 px-6 py-12 text-center sm:px-10"><h2 className="font-display text-3xl font-bold tracking-tight text-ink-950">Ready to create a safer agreement?</h2><p className="mx-auto mt-4 max-w-xl text-sm leading-6 text-slate-600">Preview the complete milestone workflow with demo data. No wallet signature or real funds are required.</p><Link to="/jobs/create" className="btn-dark mt-7">Create a Demo Job <ArrowRight className="size-4" /></Link></div></div></section>
+        <section className="bg-white py-20"><div className="container-shell"><div className="rounded-3xl border border-mint-100 bg-mint-50 px-6 py-12 text-center sm:px-10"><h2 className="font-display text-3xl font-bold tracking-tight text-ink-950">Ready to create a safer agreement?</h2><p className="mx-auto mt-4 max-w-xl text-sm leading-6 text-slate-600">Post a job, review applications, and release payment only when work is approved — all secured by on-chain escrow.</p><Link to="/jobs/create" className="btn-dark mt-7">Create a Job <ArrowRight className="size-4" /></Link></div></div></section>
       </main>
       <Footer />
     </div>

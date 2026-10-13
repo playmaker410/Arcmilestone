@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"arcmilestone/models"
@@ -16,6 +17,11 @@ import (
 // offchain marketplace record.
 type JobRepository struct {
 	db *sql.DB
+}
+
+// DB returns the underlying sql.DB connection pool.
+func (r *JobRepository) DB() *sql.DB {
+	return r.db
 }
 
 // UpdateDetailsParams contains the job fields that can be edited
@@ -162,12 +168,14 @@ func (r *JobRepository) FindByID(ctx context.Context, id uint64) (*models.Job, e
 	return job, nil
 }
 
-// ListOpen returns jobs with status = 'OPEN', ordered newest first.
+// ListOpen returns jobs with status = 'OPEN' or 'REVIEWING_APPLICATIONS'
+// where the application deadline has not yet passed. Ordered newest first.
 func (r *JobRepository) ListOpen(ctx context.Context) ([]*models.Job, error) {
 	rows, err := r.db.QueryContext(ctx,
 		"SELECT "+jobColumns+`
 		FROM jobs
 		WHERE status IN ('OPEN', 'REVIEWING_APPLICATIONS')
+		  AND (application_deadline IS NULL OR application_deadline > UTC_TIMESTAMP())
 		ORDER BY created_at DESC, id DESC`,
 	)
 	if err != nil {
@@ -226,6 +234,22 @@ func (r *JobRepository) UpdateStatus(ctx context.Context, jobID uint64, status m
 	return requireOneAffectedRow(ctx, r.db, "jobs", jobID, result, "update job status")
 }
 
+// ExpireJobs transitions OPEN jobs to EXPIRED if their application deadline has passed.
+// It ignores REVIEWING_APPLICATIONS (jobs with applications) and other statuses.
+func (r *JobRepository) ExpireJobs(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = 'EXPIRED'
+		WHERE status = 'OPEN' 
+		  AND application_deadline IS NOT NULL 
+		  AND application_deadline < UTC_TIMESTAMP()
+	`)
+	if err != nil {
+		return fmt.Errorf("expire jobs: %w", err)
+	}
+	return nil
+}
+
 // SelectFreelancer stores the chosen freelancer's user ID on a job.
 // Business rules (only the creator may do this, job must be in the right
 // state, etc.) belong to the service layer.
@@ -263,16 +287,23 @@ const detailColumns = `
 	j.created_at,
 	j.updated_at,
 	creator.wallet_address        AS creator_wallet,
+	creator.username              AS creator_username,
 	freelancer.wallet_address     AS selected_freelancer_wallet,
+	freelancer.username           AS selected_freelancer_username,
 	je.status                     AS escrow_status,
 	je.blockchain_job_id,
-	je.funding_transaction_hash`
+	je.funding_transaction_hash,
+	je.contract_address           AS escrow_contract_address,
+	sub.status                    AS submission_status,
+	COALESCE(sub.revision_count, 0) AS revision_count,
+	(SELECT COUNT(*) FROM applications a WHERE a.job_id = j.id) AS application_count`
 
 const detailFrom = `
 	FROM jobs j
 	JOIN  users creator    ON creator.id    = j.creator_user_id
 	LEFT JOIN users freelancer ON freelancer.id = j.selected_freelancer_id
-	LEFT JOIN job_escrows je   ON je.job_id     = j.id`
+	LEFT JOIN job_escrows je   ON je.job_id     = j.id
+	LEFT JOIN submissions sub  ON sub.job_id    = j.id`
 
 // FindDetailByID returns an enriched job by its database ID.
 func (r *JobRepository) FindDetailByID(ctx context.Context, id uint64) (*models.JobDetail, error) {
@@ -290,6 +321,7 @@ func (r *JobRepository) ListOpenDetail(ctx context.Context) ([]*models.JobDetail
 	rows, err := r.db.QueryContext(ctx,
 		"SELECT"+detailColumns+detailFrom+`
 		WHERE j.status IN ('OPEN', 'REVIEWING_APPLICATIONS')
+		  AND (j.application_deadline IS NULL OR j.application_deadline > UTC_TIMESTAMP())
 		ORDER BY j.created_at DESC, j.id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list open job details: %w", err)
@@ -310,6 +342,175 @@ func (r *JobRepository) ListByCreatorDetail(ctx context.Context, creatorUserID u
 	}
 	defer rows.Close()
 	return collectJobDetails(rows)
+}
+
+type OpenJobsFilter struct {
+	Query  string
+	Skill  string
+	Budget string
+}
+
+func (r *JobRepository) ListOpenPaginated(ctx context.Context, callerUserID *uint64, filter OpenJobsFilter, page, limit int) ([]*models.JobDetail, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 10
+	}
+	offset := (page - 1) * limit
+
+	where := `
+		WHERE j.status IN ('OPEN', 'REVIEWING_APPLICATIONS')
+		  AND (j.application_deadline IS NULL OR j.application_deadline > UTC_TIMESTAMP())
+		  AND je.status = 'awaiting_freelancer'`
+	args := []any{}
+
+	if callerUserID != nil {
+		where += ` AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.job_id = j.id AND a.applicant_user_id = ?)`
+		args = append(args, *callerUserID)
+	}
+
+	if filter.Query != "" {
+		where += ` AND (j.title LIKE ? OR j.description LIKE ?)`
+		q := "%" + filter.Query + "%"
+		args = append(args, q, q)
+	}
+
+	if filter.Skill != "" && filter.Skill != "all" {
+		where += ` AND j.required_skills LIKE ?`
+		args = append(args, `%"\"`+filter.Skill+`\""%`)
+	}
+
+	if filter.Budget == "under-100" {
+		where += ` AND CAST(j.budget AS DECIMAL(36,2)) < 100`
+	} else if filter.Budget == "100-250" {
+		where += ` AND CAST(j.budget AS DECIMAL(36,2)) >= 100 AND CAST(j.budget AS DECIMAL(36,2)) <= 250`
+	} else if filter.Budget == "over-250" {
+		where += ` AND CAST(j.budget AS DECIMAL(36,2)) > 250`
+	}
+
+	var total int
+	countQuery := "SELECT COUNT(DISTINCT j.id) " + detailFrom + where
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count open jobs: %w", err)
+	}
+
+	query := "SELECT" + detailColumns + detailFrom + where + " ORDER BY j.created_at DESC, j.id DESC LIMIT ? OFFSET ?"
+	queryArgs := append(append([]any{}, args...), limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list open job details paginated: %w", err)
+	}
+	defer rows.Close()
+
+	details, err := collectJobDetails(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return details, total, nil
+}
+
+func (r *JobRepository) ListByCreatorPaginated(ctx context.Context, creatorUserID uint64, group, q string, page, limit int) ([]*models.JobDetail, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 10
+	}
+	offset := (page - 1) * limit
+
+	where := ` WHERE j.creator_user_id = ?`
+	args := []any{creatorUserID}
+
+	if q != "" {
+		where += ` AND j.title LIKE ?`
+		args = append(args, "%"+q+"%")
+	}
+
+	switch group {
+	case "active":
+		where += ` AND j.status = 'OPEN'`
+	case "needs_review":
+		where += ` AND j.status = 'REVIEWING_APPLICATIONS'`
+	case "in_progress":
+		where += ` AND j.status = 'IN_PROGRESS' AND (je.status = 'funded' OR je.status IS NULL)`
+	case "submitted":
+		where += ` AND je.status = 'work_submitted'`
+	case "history":
+		where += ` AND (j.status IN ('COMPLETED', 'CANCELLED', 'EXPIRED') OR je.status IN ('completed', 'refunded'))`
+	}
+
+	var total int
+	countQuery := "SELECT COUNT(DISTINCT j.id) " + detailFrom + where
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count creator jobs: %w", err)
+	}
+
+	query := "SELECT" + detailColumns + detailFrom + where + " ORDER BY j.created_at DESC, j.id DESC LIMIT ? OFFSET ?"
+	queryArgs := append(append([]any{}, args...), limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list creator jobs paginated: %w", err)
+	}
+	defer rows.Close()
+
+	details, err := collectJobDetails(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return details, total, nil
+}
+
+func (r *JobRepository) ListByFreelancerPaginated(ctx context.Context, freelancerUserID uint64, group, q string, page, limit int) ([]*models.JobDetail, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 10
+	}
+	offset := (page - 1) * limit
+
+	where := ` WHERE j.selected_freelancer_id = ?`
+	args := []any{freelancerUserID}
+
+	if q != "" {
+		where += ` AND j.title LIKE ?`
+		args = append(args, "%"+q+"%")
+	}
+
+	switch group {
+	case "in_progress":
+		where += ` AND je.status = 'funded'`
+	case "submitted":
+		where += ` AND je.status = 'work_submitted'`
+	case "completed":
+		where += ` AND je.status = 'completed'`
+	case "refunded":
+		where += ` AND je.status = 'refunded'`
+	}
+
+	var total int
+	countQuery := "SELECT COUNT(DISTINCT j.id) " + detailFrom + where
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count freelancer jobs: %w", err)
+	}
+
+	query := "SELECT" + detailColumns + detailFrom + where + " ORDER BY j.created_at DESC, j.id DESC LIMIT ? OFFSET ?"
+	queryArgs := append(append([]any{}, args...), limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list freelancer jobs paginated: %w", err)
+	}
+	defer rows.Close()
+
+	details, err := collectJobDetails(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return details, total, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -372,13 +573,21 @@ func scanJobDetail(row rowScanner) (*models.JobDetail, error) {
 		&d.CreatedAt,
 		&d.UpdatedAt,
 		&d.CreatorWallet,
+		&d.CreatorUsername,
 		&d.SelectedFreelancerWallet,
+		&d.SelectedFreelancerUsername,
 		&d.EscrowStatus,
 		&d.BlockchainJobID,
 		&d.FundingTransactionHash,
+		&d.EscrowContractAddress,
+		&d.SubmissionStatus,
+		&d.RevisionCount,
+		&d.ApplicationCount,
 	); err != nil {
 		return nil, err
 	}
+	ms := strings.ToLower(string(d.Status))
+	d.MarketplaceStatus = &ms
 	return d, nil
 }
 

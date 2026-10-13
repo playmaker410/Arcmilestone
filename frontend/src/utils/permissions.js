@@ -67,8 +67,10 @@ export const canSubmitWork = (job, walletAddress) =>
   isSelectedFreelancer(job, walletAddress) &&
   getEscrowStatus(job) === 'funded'
 
-export const canApproveWork = (job, walletAddress) =>
-  isJobCreator(job, walletAddress) && getEscrowStatus(job) === 'work_submitted'
+export const canApproveWork = (job, walletAddress) => {
+  const escrow = getEscrowStatus(job)
+  return isJobCreator(job, walletAddress) && (escrow === 'work_submitted' || escrow === 'funded')
+}
 
 export const canClaimRefund = (job, walletAddress) => {
   const deadline = getDeliveryDeadline(job)
@@ -91,3 +93,21 @@ export const canCancelUnfundedJob = (job, walletAddress) =>
   isJobCreator(job, walletAddress) &&
   getEscrowStatus(job) === null &&
   (getMarketplaceStatus(job) === 'open' || getMarketplaceStatus(job) === 'reviewing_applications')
+
+export const canRequestChanges = (job, walletAddress) => {
+  const escrow = getEscrowStatus(job)
+  return isJobCreator(job, walletAddress) && (escrow === 'work_submitted' || escrow === 'funded')
+}
+
+export const canClaimPaymentAfterReview = (job, walletAddress, submission) => {
+  if (!isSelectedFreelancer(job, walletAddress)) return false
+  if (getEscrowStatus(job) !== 'work_submitted') return false
+  if (!submission) return false
+  const dateStr = submission.reviewed_at || submission.submitted_at || submission.updated_at || submission.created_at
+  if (!dateStr) return false
+  const sevenDays = 7 * 24 * 60 * 60 * 1000
+  return new Date(dateStr).getTime() + sevenDays < Date.now()
+}
+
+export const canAccessJobDiscussion = (job, walletAddress) =>
+  Boolean(walletAddress) && (isJobCreator(job, walletAddress) || isSelectedFreelancer(job, walletAddress))

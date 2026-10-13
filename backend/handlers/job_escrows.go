@@ -2,8 +2,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 
+	"arcmilestone/apperr"
 	"arcmilestone/middleware"
 	"arcmilestone/services"
 	"arcmilestone/utils"
@@ -91,4 +94,46 @@ func (h *JobEscrowHandler) GetEscrow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.WriteJSON(w, http.StatusOK, escrow)
+}
+
+// SyncEscrow handles POST /api/jobs/{id}/sync_escrow (protected).
+func (h *JobEscrowHandler) SyncEscrow(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		utils.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+		return
+	}
+
+	jobID, err := parseUint64Param(r, "id")
+	if err != nil {
+		utils.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid job id"})
+		return
+	}
+
+	var req struct {
+		TransactionHash string `json:"transaction_hash"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		utils.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if err := h.svc.SyncEscrow(r.Context(), jobID, userID, req.TransactionHash); err != nil {
+		log.Printf("[sync_escrow] failed for job %d (tx %s): %v", jobID, req.TransactionHash, err)
+		if errors.Is(err, apperr.ErrNotFound) || errors.Is(err, apperr.ErrForbidden) || errors.Is(err, apperr.ErrUnauthorized) {
+			utils.WriteError(w, err)
+			return
+		}
+		// Return 200 with pending_confirmation for blockchain RPC / indexing delay
+		// so the frontend client does not crash when an on-chain transaction succeeded.
+		utils.WriteJSON(w, http.StatusOK, map[string]string{
+			"status":  "pending_confirmation",
+			"warning": err.Error(),
+		})
+		return
+	}
+
+	utils.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

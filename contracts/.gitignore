@@ -7,9 +7,6 @@
 # pnpm deploy output
 /bundle
 
-# Hardhat Build Artifacts
-/artifacts
-
 # Hardhat compilation (v2) support directory
 /cache
 
@@ -29,3 +26,9 @@
 
 # Snapshot cheatcodes output
 /snapshots
+
+# AI agent tool directories
+/.agents
+/.claude
+CLAUDE.md
+AGENTS.md

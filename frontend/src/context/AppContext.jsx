@@ -22,8 +22,6 @@ export default function AppProvider({ children }) {
   const [notifications, setNotifications] = useState([])
   const [unreadCount, setUnreadCount] = useState(0)
 
-  // ── TEMPORARY: session restore commented out while auth is bypassed ─────────
-  // Restore session on mount
   // Restore session on mount
   useEffect(() => {
     const token = api.getToken()
@@ -39,7 +37,6 @@ export default function AppProvider({ children }) {
       })
       .finally(() => setAuthLoading(false))
   }, [])
-  // ── END TEMPORARY ────────────────────────────────────────────────────────────
 
 
 
@@ -244,6 +241,7 @@ export default function AppProvider({ children }) {
   // Poll unread count every 30s when authenticated
   useEffect(() => {
     if (!isWalletConnected) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadUnreadCount()
     const interval = setInterval(loadUnreadCount, 30000)
     return () => clearInterval(interval)

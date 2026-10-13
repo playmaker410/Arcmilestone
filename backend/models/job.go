@@ -15,6 +15,7 @@ const (
 	JobStatusInProgress            JobStatus = "IN_PROGRESS"
 	JobStatusCompleted             JobStatus = "COMPLETED"
 	JobStatusCancelled             JobStatus = "CANCELLED"
+	JobStatusExpired               JobStatus = "EXPIRED"
 )
 
 // Job corresponds to one row in the jobs table.
@@ -53,13 +54,24 @@ type JobDetail struct {
 	Job
 
 	// From users JOIN on creator_user_id
-	CreatorWallet string `json:"creator_wallet"`
+	CreatorWallet   string  `json:"creator_wallet"`
+	CreatorUsername *string `json:"creator_username"`
 
 	// From users JOIN on selected_freelancer_id (null when no freelancer yet)
-	SelectedFreelancerWallet *string `json:"selected_freelancer_wallet"`
+	SelectedFreelancerWallet   *string `json:"selected_freelancer_wallet"`
+	SelectedFreelancerUsername *string `json:"selected_freelancer_username"`
 
 	// From job_escrows LEFT JOIN (null when escrow not yet recorded)
 	EscrowStatus           *string `json:"escrow_status"`
 	BlockchainJobID        *string `json:"blockchain_job_id"`
 	FundingTransactionHash *string `json:"funding_transaction_hash"`
+	// The contract this job's escrow actually lives on. Jobs funded before a
+	// redeploy keep their original contract, so clients must target this address.
+	EscrowContractAddress *string `json:"escrow_contract_address"`
+
+	MarketplaceStatus *string `json:"marketplace_status"`
+	SubmissionStatus  *string `json:"submission_status"`
+	RevisionCount     uint32  `json:"revision_count"`
+	ApplicationCount  int     `json:"application_count"`
 }
+

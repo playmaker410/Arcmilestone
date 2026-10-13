@@ -30,10 +30,15 @@ func main() {
 	}
 
 	// =====================================================
-	// STEP 2: CONNECT TO MYSQL
+	// STEP 2: CONNECT TO MYSQL & ENSURE SCHEMA
 	// =====================================================
 	startupContext, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
 	db, err := database.Open(startupContext, cfg.Database)
+	if err == nil {
+		if schemaErr := database.EnsureSchema(startupContext, db); schemaErr != nil {
+			log.Printf("warning: schema upgrade check: %v", schemaErr)
+		}
+	}
 	cancelStartup()
 	if err != nil {
 		log.Fatalf("database startup failed: %v", err)
@@ -56,6 +61,8 @@ func main() {
 	subRepo := repositories.NewSubmissionRepository(db)
 	notifRepo := repositories.NewNotificationRepository(db)
 	escrowRepo := repositories.NewJobEscrowRepository(db)
+	msgRepo := repositories.NewMessageRepository(db)
+	eventRepo := repositories.NewEscrowEventRepository(db)
 
 	// =====================================================
 	// STEP 4: BUILD SERVICES
@@ -64,14 +71,15 @@ func main() {
 	userSvc := services.NewUserService(userRepo)
 	jobSvc := services.NewJobService(jobRepo, userRepo, notifRepo)
 	appSvc := services.NewApplicationService(appRepo, jobRepo, userRepo, notifRepo)
-	subSvc := services.NewSubmissionService(subRepo, jobRepo, notifRepo)
+	subSvc := services.NewSubmissionService(subRepo, jobRepo, notifRepo, msgRepo)
 	notifSvc := services.NewNotificationService(notifRepo)
 	escrowSvc := services.NewJobEscrowService(escrowRepo, jobRepo)
+	msgSvc := services.NewMessageService(msgRepo, jobRepo, notifRepo)
 
 	// =====================================================
 	// STEP 5: BUILD THE HTTP SERVER
 	// =====================================================
-	handler := routes.New(db, authSvc, userSvc, jobSvc, appSvc, subSvc, notifSvc, escrowSvc, cfg.FrontendURL)
+	handler := routes.New(db, authSvc, userSvc, jobSvc, appSvc, subSvc, notifSvc, escrowSvc, msgSvc, eventRepo, cfg.FrontendURL)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -82,7 +90,7 @@ func main() {
 	// =====================================================
 	// STEP 5.5: START THE ARC LISTENER
 	// =====================================================
-	arcListener, err := services.NewArcListener(cfg.ArcRPCURL, cfg.ArcContractAddress, escrowRepo, jobRepo)
+	arcListener, err := services.NewArcListener(cfg.ArcRPCURL, cfg.ArcContractAddress, escrowRepo, jobRepo, eventRepo)
 	if err != nil {
 		log.Fatalf("failed to initialize Arc listener: %v", err)
 	}

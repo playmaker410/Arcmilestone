@@ -8,7 +8,6 @@ import useApp from '../hooks/useApp'
 import { api } from '../services/api'
 import { checkSufficientBalance, createAndFundJobOpen, formatUnits } from '../services/blockchain'
 import { formatUSDC } from '../utils/format'
-import { pollJobForEscrowStatus } from '../utils/pollJob'
 
 const initialForm = {
   title: '', description: '', skills: '',
@@ -92,21 +91,20 @@ export default function CreateJob() {
 
       // Step 3: lock the funds on-chain. MetaMask will prompt here.
       // metadataHashInput uses the DB job ID so it ties this escrow to this record.
-      let onChainResult
       try {
-        onChainResult = await createAndFundJobOpen({
+        await createAndFundJobOpen({
           deliveryDeadlineISO: new Date(`${form.deliveryDeadline}T23:59:59Z`).toISOString(),
           metadataHashInput: String(job.id),
           budgetString: budgetStr,
           clientAddress: addr,
         })
-      } catch (chainErr) {
+      } catch {
         // The user rejected the transaction or it failed.
         // Rollback the database job so we don't leave an unfunded ghost job.
         try {
-          await api.deleteJob(job.id)
+          await api.cancelJob(job.id)
         } catch (rollbackErr) {
-          console.error("Failed to delete job after blockchain error:", rollbackErr)
+          console.error("Failed to cancel job after blockchain error:", rollbackErr)
         }
 
         setFormAlert(`Transaction failed or cancelled. The job was not created.`)

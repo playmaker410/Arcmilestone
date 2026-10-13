@@ -24,16 +24,25 @@ type ArcListener struct {
 	chainID    uint64
 	escrowRepo *repositories.JobEscrowRepository
 	jobRepo    *repositories.JobRepository
+	eventRepo  *repositories.EscrowEventRepository
 }
 
-func NewArcListener(rpcURL, contractAddr string, escrowRepo *repositories.JobEscrowRepository, jobRepo *repositories.JobRepository) (*ArcListener, error) {
+func NewArcListener(
+	rpcURL, contractAddr string,
+	escrowRepo *repositories.JobEscrowRepository,
+	jobRepo *repositories.JobRepository,
+	eventRepo *repositories.EscrowEventRepository,
+) (*ArcListener, error) {
 	if rpcURL == "" || contractAddr == "" {
 		return nil, nil // Disabled if not configured
 	}
 
 	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
-		return nil, fmt.Errorf("dial ethclient: %w", err)
+		client, err = ethclient.Dial("https://rpc.testnet.arc.network")
+		if err != nil {
+			return nil, fmt.Errorf("dial ethclient: %w", err)
+		}
 	}
 
 	chainID, err := client.ChainID(context.Background())
@@ -47,6 +56,7 @@ func NewArcListener(rpcURL, contractAddr string, escrowRepo *repositories.JobEsc
 		chainID:    chainID.Uint64(),
 		escrowRepo: escrowRepo,
 		jobRepo:    jobRepo,
+		eventRepo:  eventRepo,
 	}, nil
 }
 
@@ -62,7 +72,6 @@ func (l *ArcListener) Start(ctx context.Context) {
 	header, err := l.client.HeaderByNumber(ctx, nil)
 	if err == nil {
 		lastBlock = header.Number.Uint64()
-		// Scan back 1000 blocks on startup to catch missed events while offline
 		if lastBlock > 1000 {
 			lastBlock -= 1000
 		} else {
@@ -77,6 +86,7 @@ func (l *ArcListener) Start(ctx context.Context) {
 	topicSubmitted := crypto.Keccak256Hash([]byte("WorkSubmitted(uint256,address,bytes32)"))
 	topicReleased := crypto.Keccak256Hash([]byte("PaymentReleased(uint256,address,uint256)"))
 	topicRefunded := crypto.Keccak256Hash([]byte("JobRefunded(uint256,address,uint256)"))
+	topicRevision := crypto.Keccak256Hash([]byte("RevisionRequested(uint256,address,uint256)"))
 
 	for {
 		select {
@@ -94,7 +104,6 @@ func (l *ArcListener) Start(ctx context.Context) {
 				continue
 			}
 
-			// Do not query more than 100 blocks at once to avoid RPC limits.
 			fromBlock := lastBlock + 1
 			toBlock := latestBlock
 			if toBlock-fromBlock > 100 {
@@ -111,6 +120,7 @@ func (l *ArcListener) Start(ctx context.Context) {
 					topicSubmitted,
 					topicReleased,
 					topicRefunded,
+					topicRevision,
 				}},
 			}
 
@@ -131,6 +141,8 @@ func (l *ArcListener) Start(ctx context.Context) {
 					l.processFreelancerAssignedLog(ctx, vLog)
 				case topicSubmitted:
 					l.processWorkSubmittedLog(ctx, vLog)
+				case topicRevision:
+					l.processRevisionRequestedLog(ctx, vLog)
 				case topicReleased:
 					l.processPaymentReleasedLog(ctx, vLog)
 				case topicRefunded:
@@ -154,7 +166,6 @@ func (l *ArcListener) processJobCreatedLog(ctx context.Context, vLog types.Log) 
 	amount := amountFloat.Text('f', 18)
 	metadataHash := common.BytesToHash(vLog.Data[64:96])
 
-	// Find the matching DB job by hashing IDs of unfunded jobs
 	jobs, err := l.jobRepo.ListOpen(ctx)
 	if err != nil {
 		log.Printf("arc_listener: list open jobs: %v", err)
@@ -163,10 +174,9 @@ func (l *ArcListener) processJobCreatedLog(ctx context.Context, vLog types.Log) 
 
 	var matchedJobID uint64
 	for _, job := range jobs {
-		// Only consider jobs without an escrow record.
 		_, err := l.escrowRepo.FindByJobID(ctx, job.ID)
 		if err == nil {
-			continue // Escrow exists
+			continue
 		}
 		
 		idStr := strconv.FormatUint(job.ID, 10)
@@ -196,6 +206,16 @@ func (l *ArcListener) processJobCreatedLog(ctx context.Context, vLog types.Log) 
 		log.Printf("arc_listener: failed to create escrow for job %d: %v", matchedJobID, err)
 	} else {
 		log.Printf("arc_listener: created escrow for job %d, tx %s", matchedJobID, vLog.TxHash.Hex())
+		if l.eventRepo != nil {
+			_ = l.eventRepo.Record(ctx, repositories.RecordEscrowEventParams{
+				JobID:           matchedJobID,
+				EventType:       "funded",
+				Amount:          &amount,
+				TransactionHash: vLog.TxHash.Hex(),
+				LogIndex:        vLog.Index,
+				BlockNumber:     vLog.BlockNumber,
+			})
+		}
 	}
 }
 
@@ -215,6 +235,15 @@ func (l *ArcListener) processFreelancerAssignedLog(ctx context.Context, vLog typ
 	}
 	_ = l.escrowRepo.UpdateStatus(ctx, escrow.JobID, "funded")
 	_ = l.jobRepo.UpdateStatus(ctx, escrow.JobID, models.JobStatusInProgress)
+	if l.eventRepo != nil {
+		_ = l.eventRepo.Record(ctx, repositories.RecordEscrowEventParams{
+			JobID:           escrow.JobID,
+			EventType:       "freelancer_assigned",
+			TransactionHash: vLog.TxHash.Hex(),
+			LogIndex:        vLog.Index,
+			BlockNumber:     vLog.BlockNumber,
+		})
+	}
 	log.Printf("arc_listener: updated job %d to funded/in_progress", escrow.JobID)
 }
 
@@ -225,7 +254,36 @@ func (l *ArcListener) processWorkSubmittedLog(ctx context.Context, vLog types.Lo
 		return
 	}
 	_ = l.escrowRepo.UpdateStatus(ctx, escrow.JobID, "work_submitted")
+	if l.eventRepo != nil {
+		_ = l.eventRepo.Record(ctx, repositories.RecordEscrowEventParams{
+			JobID:           escrow.JobID,
+			EventType:       "work_submitted",
+			TransactionHash: vLog.TxHash.Hex(),
+			LogIndex:        vLog.Index,
+			BlockNumber:     vLog.BlockNumber,
+		})
+	}
 	log.Printf("arc_listener: updated job %d to work_submitted", escrow.JobID)
+}
+
+func (l *ArcListener) processRevisionRequestedLog(ctx context.Context, vLog types.Log) {
+	escrow, err := l.getJobByBlockchainID(ctx, vLog)
+	if err != nil {
+		log.Printf("arc_listener: processRevisionRequestedLog: %v", err)
+		return
+	}
+	_ = l.escrowRepo.UpdateStatus(ctx, escrow.JobID, "funded")
+	_ = l.jobRepo.UpdateStatus(ctx, escrow.JobID, models.JobStatusInProgress)
+	if l.eventRepo != nil {
+		_ = l.eventRepo.Record(ctx, repositories.RecordEscrowEventParams{
+			JobID:           escrow.JobID,
+			EventType:       "revision_requested",
+			TransactionHash: vLog.TxHash.Hex(),
+			LogIndex:        vLog.Index,
+			BlockNumber:     vLog.BlockNumber,
+		})
+	}
+	log.Printf("arc_listener: updated job %d to funded (revision requested)", escrow.JobID)
 }
 
 func (l *ArcListener) processPaymentReleasedLog(ctx context.Context, vLog types.Log) {
@@ -236,6 +294,26 @@ func (l *ArcListener) processPaymentReleasedLog(ctx context.Context, vLog types.
 	}
 	_ = l.escrowRepo.UpdateStatus(ctx, escrow.JobID, "completed")
 	_ = l.jobRepo.UpdateStatus(ctx, escrow.JobID, models.JobStatusCompleted)
+
+	var amountPtr *string
+	if len(vLog.Data) >= 32 {
+		amountWei := new(big.Int).SetBytes(vLog.Data[0:32])
+		amountFloat := new(big.Float).SetPrec(256).SetInt(amountWei)
+		amountFloat = amountFloat.Quo(amountFloat, big.NewFloat(1e18))
+		amt := amountFloat.Text('f', 18)
+		amountPtr = &amt
+	}
+
+	if l.eventRepo != nil {
+		_ = l.eventRepo.Record(ctx, repositories.RecordEscrowEventParams{
+			JobID:           escrow.JobID,
+			EventType:       "payment_released",
+			Amount:          amountPtr,
+			TransactionHash: vLog.TxHash.Hex(),
+			LogIndex:        vLog.Index,
+			BlockNumber:     vLog.BlockNumber,
+		})
+	}
 	log.Printf("arc_listener: updated job %d to completed", escrow.JobID)
 }
 
@@ -247,5 +325,25 @@ func (l *ArcListener) processJobRefundedLog(ctx context.Context, vLog types.Log)
 	}
 	_ = l.escrowRepo.UpdateStatus(ctx, escrow.JobID, "refunded")
 	_ = l.jobRepo.UpdateStatus(ctx, escrow.JobID, models.JobStatusCancelled)
+
+	var amountPtr *string
+	if len(vLog.Data) >= 32 {
+		amountWei := new(big.Int).SetBytes(vLog.Data[0:32])
+		amountFloat := new(big.Float).SetPrec(256).SetInt(amountWei)
+		amountFloat = amountFloat.Quo(amountFloat, big.NewFloat(1e18))
+		amt := amountFloat.Text('f', 18)
+		amountPtr = &amt
+	}
+
+	if l.eventRepo != nil {
+		_ = l.eventRepo.Record(ctx, repositories.RecordEscrowEventParams{
+			JobID:           escrow.JobID,
+			EventType:       "refunded",
+			Amount:          amountPtr,
+			TransactionHash: vLog.TxHash.Hex(),
+			LogIndex:        vLog.Index,
+			BlockNumber:     vLog.BlockNumber,
+		})
+	}
 	log.Printf("arc_listener: updated job %d to refunded/cancelled", escrow.JobID)
 }

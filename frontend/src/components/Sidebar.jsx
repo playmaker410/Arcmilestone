@@ -6,90 +6,106 @@ import { shortenAddress } from '../utils/format'
 import Logo from './Logo'
 
 export default function Sidebar() {
-  const { user, wallet, isWalletConnected, isWalletBusy, connectWallet, disconnectWallet, unreadCount } = useApp()
+  const {
+    user,
+    wallet,
+    isWalletConnected,
+    isWalletBusy,
+    connectWallet,
+    disconnectWallet,
+    unreadCount,
+  } = useApp()
 
-  /**
-   * Display name resolution:
-   *   • If the user has set a username, show it with an "@" prefix so other
-   *     users can immediately identify the handle format used across the platform.
-   *   • If no username yet (new user still completing setup, or fallback),
-   *     show the shortened wallet address as before.
-   *
-   * wallet.displayName already resolves username → shortenAddress in AppContext,
-   * so we only need to conditionally add the "@" prefix here.
-   */
   const hasUsername = !!user?.username
   const displayLabel = hasUsername ? `@${user.username}` : wallet.displayName
 
   return (
     <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-white/8 bg-ink-950 lg:flex">
-      <div className="px-5 py-6"><Logo inverse /></div>
-      <nav className="flex-1 px-3" aria-label="Dashboard navigation">
-        <p className="px-3 pb-2 pt-4 text-[10px] font-bold tracking-[0.16em] text-slate-500 uppercase">Workspace</p>
-        <ul className="space-y-1">
+      {/* Logo */}
+      <div className="px-5 py-6">
+        <Logo inverse />
+      </div>
+
+      {/* Navigation */}
+      <nav className="flex-1 overflow-y-auto px-3" aria-label="Dashboard navigation">
+        <p className="px-3 pb-2 pt-2 text-[10px] font-bold tracking-[0.16em] text-slate-600 uppercase">
+          Workspace
+        </p>
+        <ul className="space-y-0.5">
           {dashboardLinks.map(({ label, to, icon: Icon, end }) => (
             <li key={to}>
               <NavLink
                 to={to}
                 end={end}
                 className={({ isActive }) =>
-                  `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition ${isActive ? 'bg-white/10 text-white shadow-sm' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`
+                  `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-all duration-150 ${
+                    isActive
+                      ? 'bg-white/10 text-white shadow-sm ring-1 ring-white/8'
+                      : 'text-slate-400 hover:bg-white/5 hover:text-white'
+                  }`
                 }
               >
-                <Icon className="size-[18px]" aria-hidden="true" />
-                {label}
-                {label === 'Notifications' && unreadCount > 0 && (
-                  <span className="ml-auto rounded-full bg-mint-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                    {unreadCount}
-                  </span>
+                {({ isActive }) => (
+                  <>
+                    <Icon
+                      className={`size-[18px] transition-colors ${isActive ? 'text-mint-400' : ''}`}
+                      aria-hidden="true"
+                    />
+                    <span className="flex-1">{label}</span>
+                    {label === 'Notifications' && unreadCount > 0 && (
+                      <span className="relative ml-auto grid size-5 place-items-center rounded-full bg-mint-500 text-[10px] font-bold text-white">
+                        <span className="pulse-ring text-mint-500" aria-hidden="true" />
+                        {unreadCount > 9 ? '9+' : unreadCount}
+                      </span>
+                    )}
+                  </>
                 )}
               </NavLink>
             </li>
           ))}
         </ul>
       </nav>
-      <div className="m-3 rounded-2xl border border-white/10 bg-white/[0.05] p-4">
+
+      {/* Wallet card */}
+      <div className="m-3 rounded-2xl border border-white/8 bg-white/[0.04] p-4">
         {isWalletConnected ? (
           <>
-            <div className="flex items-center gap-2 text-xs font-bold text-mint-400">
-              <span className="size-2 rounded-full bg-mint-400" />
-              Connected
+            <div className="flex items-center gap-2">
+              <span className="relative size-2 rounded-full bg-mint-400" aria-hidden="true" />
+              <span className="text-xs font-bold text-mint-400">Connected</span>
             </div>
 
-            {/*
-             * Username display:
-             *   When the user has a username, show it prominently with the "@"
-             *   prefix in mint colour — this is the identity other users see.
-             *   When no username exists (edge case during setup), fall back to
-             *   the shortened wallet address in white.
-             */}
-            {hasUsername ? (
-              <p className="mt-3 text-sm font-bold text-mint-400">{displayLabel}</p>
-            ) : (
-              <p className="mt-3 text-sm font-bold text-white">{displayLabel}</p>
+            <p className={`mt-3 text-sm font-bold truncate ${hasUsername ? 'text-mint-400' : 'text-white'}`}>
+              {displayLabel}
+            </p>
+            <p className="mt-1 font-mono text-xs text-slate-500">
+              {shortenAddress(wallet.address, 8, 6)}
+            </p>
+            {wallet.network && (
+              <p className="mt-1 text-xs text-slate-600">{wallet.network}</p>
             )}
 
-            {/* Always show the shortened wallet address below the display name */}
-            <p className="mt-1 font-mono text-xs text-slate-400">{shortenAddress(wallet.address, 8, 6)}</p>
-            <p className="mt-2 text-xs text-slate-500">{wallet.network}</p>
             <button
               type="button"
               onClick={disconnectWallet}
               disabled={isWalletBusy}
-              className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-bold text-slate-300 transition hover:bg-white/5 hover:text-white disabled:opacity-50"
+              className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-xs font-bold text-slate-400 transition-all hover:bg-white/5 hover:text-white disabled:opacity-50"
             >
-              <LogOut className="size-4" />Disconnect
+              <LogOut className="size-3.5" />
+              Disconnect
             </button>
           </>
         ) : (
           <>
             <p className="text-sm font-bold text-white">Wallet disconnected</p>
-            <p className="mt-1 text-xs leading-5 text-slate-400">Connect your wallet to access your account.</p>
+            <p className="mt-1 text-xs leading-5 text-slate-400">
+              Connect to access your account.
+            </p>
             <button
               type="button"
               onClick={connectWallet}
               disabled={isWalletBusy}
-              className="mt-4 w-full rounded-lg bg-mint-500 px-3 py-2 text-xs font-bold text-ink-950 hover:bg-mint-400 disabled:opacity-50"
+              className="mt-3 w-full rounded-xl bg-mint-500 px-3 py-2 text-xs font-bold text-ink-950 transition hover:bg-mint-400 disabled:opacity-50"
             >
               {isWalletBusy ? 'Connecting…' : 'Connect wallet'}
             </button>

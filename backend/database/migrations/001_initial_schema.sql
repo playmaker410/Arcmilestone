@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS auth_nonces (
 
     PRIMARY KEY (id),
 
-    UNIQUE KEY uq_auth_nonces_nonce (nonce),
+    UNIQUE KEY uq_auth_nonces_nonce (nonce_hash),
     KEY idx_auth_nonces_wallet (wallet_address),
     KEY idx_auth_nonces_user (user_id),
     KEY idx_auth_nonces_expires (expires_at),
